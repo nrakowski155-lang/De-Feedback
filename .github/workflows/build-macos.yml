@@ -1,0 +1,88 @@
+name: Build macOS (AU + VST3)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: AU + VST3 (universal)
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          cmake --version
+          uname -m
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DDEFB_BUILD_TESTS=ON \
+            -DDEFB_COPY_PLUGIN_AFTER_BUILD=OFF
+
+      - name: Build
+        run: cmake --build build -j 4
+
+      - name: Run DSP tests
+        run: ./build/defb_dsp_tests
+
+      - name: Check binary architectures
+        run: |
+          lipo -info build/DeFeedback_artefacts/Release/AU/De-Feedback.component/Contents/MacOS/De-Feedback
+          lipo -info build/DeFeedback_artefacts/Release/VST3/De-Feedback.vst3/Contents/MacOS/De-Feedback
+
+      - name: Ad-hoc sign bundles
+        run: |
+          codesign --force --deep --sign - build/DeFeedback_artefacts/Release/AU/De-Feedback.component
+          codesign --force --deep --sign - build/DeFeedback_artefacts/Release/VST3/De-Feedback.vst3
+          codesign --verify --deep --strict --verbose=2 build/DeFeedback_artefacts/Release/AU/De-Feedback.component
+
+      - name: Validate Audio Unit with auval
+        run: |
+          sudo mkdir -p /Library/Audio/Plug-Ins/Components
+          sudo cp -R build/DeFeedback_artefacts/Release/AU/De-Feedback.component /Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          sleep 2
+          auval -v aufx Dfb1 Dfbk
+
+      - name: Package
+        if: always()
+        run: |
+          mkdir -p artifacts
+          if [ -d build/DeFeedback_artefacts/Release/AU/De-Feedback.component ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              build/DeFeedback_artefacts/Release/AU/De-Feedback.component \
+              artifacts/De-Feedback-AU-macOS-universal.zip
+          fi
+          if [ -d build/DeFeedback_artefacts/Release/VST3/De-Feedback.vst3 ]; then
+            ditto -c -k --sequesterRsrc --keepParent \
+              build/DeFeedback_artefacts/Release/VST3/De-Feedback.vst3 \
+              artifacts/De-Feedback-VST3-macOS-universal.zip
+          fi
+          ls -lh artifacts
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: De-Feedback-macOS
+          path: artifacts/*.zip
+          if-no-files-found: warn
+          retention-days: 30
