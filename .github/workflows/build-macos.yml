@@ -88,6 +88,12 @@ jobs:
             tail -n 120 /tmp/dsp-tests.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ ${status} -ne 0 ]; then
+            echo "::error title=DSP tests::the test binary exited with ${status}"
+            grep '\[FAIL\]' /tmp/dsp-tests.log | head -n 12 | while IFS= read -r line; do
+              echo "::error title=DSP test failed::${line}"
+            done
+          fi
           exit ${status}
 
       - name: Check binary architectures

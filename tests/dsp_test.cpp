@@ -19,6 +19,37 @@ using namespace defb;
 
 static constexpr double kPi = 3.14159265358979323846;
 
+// Gaussian noise from raw mt19937 bits. std::normal_distribution is allowed to
+// use any algorithm, so the same seed produces different audio on libc++ and
+// libstdc++ and the test thresholds would depend on the runner's standard
+// library. Box-Muller on raw draws keeps the signal identical everywhere.
+struct PortableGaussian
+{
+    std::mt19937& rng;
+    double spare = 0.0;
+    bool   hasSpare = false;
+
+    explicit PortableGaussian (std::mt19937& r) : rng (r) {}
+
+    float next()
+    {
+        if (hasSpare)
+        {
+            hasSpare = false;
+            return (float) spare;
+        }
+
+        const double u1 = ((double) (rng() >> 8) + 0.5) / 16777216.0; // (0, 1)
+        const double u2 = ((double) (rng() >> 8) + 0.5) / 16777216.0;
+        const double mag = std::sqrt (-2.0 * std::log (u1));
+        const double angle = 2.0 * kPi * u2;
+
+        spare    = mag * std::sin (angle);
+        hasSpare = true;
+        return (float) (mag * std::cos (angle));
+    }
+};
+
 static int gChecks = 0;
 static int gFailures = 0;
 
@@ -82,7 +113,7 @@ struct Howl
 static std::vector<float> musicBed (int n, double sr, std::mt19937& rng, bool drums)
 {
     std::vector<float> out ((size_t) n, 0.0f);
-    std::normal_distribution<float> noise (0.0f, 1.0f);
+    PortableGaussian noise (rng);
 
     const double chords[3][3] = { { 110.0, 164.8, 220.0 },
                                   {  98.0, 146.8, 196.0 },
@@ -106,7 +137,7 @@ static std::vector<float> musicBed (int n, double sr, std::mt19937& rng, bool dr
                 s += (0.030 / (double) h) * env * std::sin (2.0 * kPi * f0 * (double) h * vib * t + 0.7 * h);
         }
 
-        s += 0.004 * noise (rng);
+        s += 0.004 * (double) noise.next();
         out[(size_t) i] = (float) s;
     }
 
@@ -120,7 +151,7 @@ static std::vector<float> musicBed (int n, double sr, std::mt19937& rng, bool dr
             for (int i = 0; i < (int) (sr * 0.06) && start + i < n; ++i)
             {
                 const double env = std::exp (-(double) i / (sr * 0.012));
-                out[(size_t) (start + i)] += (float) (0.16 * env * noise (rng));
+                out[(size_t) (start + i)] += (float) (0.16 * env * (double) noise.next());
             }
         }
     }
@@ -168,9 +199,9 @@ static void testBypassIsExact()
     engine.prepare (48000.0, 256);
 
     std::mt19937 rng (7);
-    std::normal_distribution<float> dist (0.0f, 0.2f);
+    PortableGaussian dist (rng);
     std::vector<float> l (4096), r (4096);
-    for (size_t i = 0; i < l.size(); ++i) { l[i] = dist (rng); r[i] = dist (rng); }
+    for (size_t i = 0; i < l.size(); ++i) { l[i] = 0.2f * dist.next(); r[i] = 0.2f * dist.next(); }
 
     auto original = l;
     processStereo (engine, l, r, 256);
@@ -417,12 +448,12 @@ static void testExtremeSettingsStayStable()
     const int n = (int) (sr * 4.0);
 
     std::mt19937 rng (41);
-    std::normal_distribution<float> dist (0.0f, 0.6f);
+    PortableGaussian dist (rng);
     std::vector<float> l ((size_t) n), r ((size_t) n);
     for (int i = 0; i < n; ++i)
     {
-        l[(size_t) i] = dist (rng) + 0.4f * std::sin (2.0f * 3.14159265f * 2200.0f * (float) i / (float) sr);
-        r[(size_t) i] = dist (rng) - 0.2f * std::sin (2.0f * 3.14159265f * 55.0f * (float) i / (float) sr);
+        l[(size_t) i] = 0.6f * dist.next() + 0.4f * std::sin (2.0f * 3.14159265f * 2200.0f * (float) i / (float) sr);
+        r[(size_t) i] = 0.6f * dist.next() - 0.2f * std::sin (2.0f * 3.14159265f * 55.0f * (float) i / (float) sr);
     }
 
     Engine engine;
@@ -520,11 +551,11 @@ static void testAiMaskAssist()
     // steady, quiet resonance inside a loud noise floor: no growth, not
     // dominant. With sensitivity 20 dB the DSP alone has no candidate at all.
     std::mt19937 rng (71);
-    std::normal_distribution<float> dist (0.0f, 1.0f);
+    PortableGaussian dist (rng);
     std::vector<float> bed ((size_t) n);
 
     for (int i = 0; i < n; ++i)
-        bed[(size_t) i] = 0.10f * dist (rng)
+        bed[(size_t) i] = 0.10f * dist.next()
                         + (float) (0.02 * std::sin (2.0 * kPi * toneFreq * (double) i / sr));
 
     Parameters p;
