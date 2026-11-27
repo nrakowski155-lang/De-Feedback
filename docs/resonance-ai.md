@@ -64,6 +64,13 @@ Der Audio-Thread:
 | 32-bit Float | JUCE-Pfad | – |
 | Kein Kopieren von Konkurrenzsoftware | eigene DSP-/ML-Implementierung | – |
 
+> Hinweis zum Kontextfenster: 64 Bänder × 256 Frames bei einem Hop von 256
+> Samples ergeben 1,37 s bei 48 kHz. Die Spezifikation nennt zusätzlich ~341 ms,
+> was 64 Frames entspräche. Implementiert ist die Tensorform **64 × 256**, weil
+> sie zu Hop 256 und dem 2048er-Fenster passt; das Modell sieht damit gut eine
+> Sekunde Vorgeschichte, was gehaltene Gesangsnoten von Feedback unterscheidbar
+> macht.
+
 ## 4. Gemessene Werte (dieser Workspace)
 
 | Messung | Wert |
