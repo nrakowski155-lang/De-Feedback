@@ -118,7 +118,7 @@ programme material" case; the model must not make that worse.
 | Model size | < 10 MB | ~2.4 MB FP16 weights |
 | Inference p95 | < 10 ms | **not measured** – run `benchmark_coreml.py` on the M3 |
 | Memory | < 150 MB runtime | **not measured** |
-| Detection latency | < 100 ms where acoustically possible | DSP: 2048 pt window + attack (default 250 ms, min 10 ms); AI adds one patch interval (~85 ms) |
+| Detection latency | < 100 ms where acoustically possible | DSP: 2048 pt window + attack (default 60 ms, min 10 ms, a dominant climbing howl is cut after a quarter of it); AI adds one patch interval (~85 ms) |
 | Added DSP latency | 0 samples | by design, causal filters, no lookahead |
 
 The output of `benchmark_coreml.py` on the target machine belongs in the

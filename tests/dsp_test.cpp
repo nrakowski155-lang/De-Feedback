@@ -243,6 +243,59 @@ static void testSingleHowl()
     check (std::isfinite (rms (l)), "Ausgang ist endlich");
 }
 
+static void testResponseTime()
+{
+    std::printf ("\nAnsprechzeit: wie schnell wird ein aufbauender Howl abgesenkt\n");
+
+    const double sr = 48000.0;
+    const int n = (int) (sr * 3.0);
+
+    std::mt19937 rng (91);
+    auto bed = musicBed (n, sr, rng, false);
+    const int onset = (int) (sr * 1.0);
+    auto howl = addHowls (n, sr, { { 1500.0, 1.0, 0.05, 0.01, 0.30 } });
+    mixInto (bed, howl);
+
+    const auto input = bed;
+    auto l = bed, r = bed;
+
+    Engine engine;
+    Parameters p; // defaults: Attack 60 ms, Auto Q, Music Guard an
+    engine.setParameters (p);
+    engine.prepare (sr, 128);
+
+    processStereo (engine, l, r);
+
+    // 10 ms windows: first window after the onset where the howl is 6 dB down
+    const int win = (int) (sr * 0.010);
+    int firstCut = -1;
+    double ampIn = 0.0, ampOut = 0.0;
+
+    for (int start = onset; start + win <= n; start += win)
+    {
+        std::vector<float> wi (input.begin() + start, input.begin() + start + win);
+        std::vector<float> wo (l.begin() + start, l.begin() + start + win);
+        const double a = toneAmplitude (wi, 1500.0, sr);
+        const double b = toneAmplitude (wo, 1500.0, sr);
+
+        if (b <= a * 0.5)
+        {
+            firstCut = start;
+            ampIn = a;
+            ampOut = b;
+            break;
+        }
+    }
+
+    const double latencyMs = firstCut < 0 ? -1.0
+                                          : 1000.0 * (double) (firstCut - onset) / sr;
+
+    char buf[160];
+    std::snprintf (buf, sizeof buf, "latency=%.0f ms (in=%.3f out=%.3f)", latencyMs, ampIn, ampOut);
+    check (firstCut >= 0, "Howl wird innerhalb von 3 s abgesenkt", buf);
+    check (latencyMs >= 0.0 && latencyMs < 150.0, "Reaktion schneller als 150 ms", buf);
+}
+
 static void testMultipleHowls()
 {
     std::printf ("\nDrei gleichzeitige Koppelfrequenzen\n");
@@ -737,6 +790,7 @@ int main()
     testFftRoundTrip();
     testBypassIsExact();
     testSingleHowl();
+    testResponseTime();
     testMultipleHowls();
     testMusicOnlyNoFalsePositives();
     testDynamicRelease();

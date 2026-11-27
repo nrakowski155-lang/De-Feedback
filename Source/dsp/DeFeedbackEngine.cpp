@@ -226,54 +226,54 @@ void Engine::process (float* left, float* right, int numSamples) noexcept
         }
     }
 
-    // ---- 2. notch gain smoothing + coefficient update (block rate) ----
-    const float blockSec      = (float) numSamples / (float) sampleRate_;
-    const float engageCoeff   = 1.0f - std::exp (-blockSec / 0.030f);
-    const float releaseCoeff  = 1.0f - std::exp (-blockSec / 0.080f);
+    // ---- 2. + 3. notch gain smoothing, coefficient update and filtering ----
+    // The coefficients are refreshed every few tens of samples instead of once
+    // per host block. A deep notch therefore comes in within a few ms, but the
+    // filter never jumps from unity to (say) -18 dB in one step, which is what
+    // makes an instant cut audible as a click or a swallowed syllable on voice.
+    constexpr int kSubBlock = 32;
 
-    int activeCount = 0;
-
-    for (auto& n : notches_)
+    for (int start = 0; start < numSamples; start += kSubBlock)
     {
-        if (! n.active)
-            continue;
+        const int   span         = std::min (kSubBlock, numSamples - start);
+        const float subSec       = (float) span / (float) sampleRate_;
+        const float engageCoeff  = 1.0f - std::exp (-subSec / 0.012f);
+        const float releaseCoeff = 1.0f - std::exp (-subSec / 0.080f);
 
-        const float coeff = n.targetDb < n.gainDb ? engageCoeff : releaseCoeff;
-        n.gainDb += (n.targetDb - n.gainDb) * coeff;
-
-        if (std::abs (n.targetDb - n.gainDb) < 0.05f)
-            n.gainDb = n.targetDb;
-
-        if (n.gainDb > -0.02f && n.targetDb >= 0.0f)
-        {
-            // fully released -> give the slot back
-            n.active = false;
-            n.track  = -1;
-            n.state[0].reset();
-            n.state[1].reset();
-            continue;
-        }
-
-        n.coeffs = makePeaking (sampleRate_, (double) n.freq, (double) n.q, (double) n.gainDb);
-        ++activeCount;
-    }
-
-    if (clearing_ && activeCount == 0)
-        clearing_ = false;
-
-    // ---- 3. filtering ----
-    if (activeCount > 0)
-    {
         int idx[kMaxNotches];
         int count = 0;
 
-        for (int i = 0; i < (int) kMaxNotches; ++i)
-            if (notches_[(size_t) i].active)
-                idx[count++] = i;
+        for (auto& n : notches_)
+        {
+            if (! n.active)
+                continue;
+
+            const float coeff = n.targetDb < n.gainDb ? engageCoeff : releaseCoeff;
+            n.gainDb += (n.targetDb - n.gainDb) * coeff;
+
+            if (std::abs (n.targetDb - n.gainDb) < 0.05f)
+                n.gainDb = n.targetDb;
+
+            if (n.gainDb > -0.02f && n.targetDb >= 0.0f)
+            {
+                // fully released -> give the slot back
+                n.active = false;
+                n.track  = -1;
+                n.state[0].reset();
+                n.state[1].reset();
+                continue;
+            }
+
+            n.coeffs = makePeaking (sampleRate_, (double) n.freq, (double) n.q, (double) n.gainDb);
+            idx[count++] = (int) (&n - notches_.data());
+        }
+
+        if (count == 0)
+            continue;
 
         if (right != nullptr)
         {
-            for (int s = 0; s < numSamples; ++s)
+            for (int s = start; s < start + span; ++s)
             {
                 float l = left[s];
                 float r = right[s];
@@ -291,7 +291,7 @@ void Engine::process (float* left, float* right, int numSamples) noexcept
         }
         else
         {
-            for (int s = 0; s < numSamples; ++s)
+            for (int s = start; s < start + span; ++s)
             {
                 float l = left[s];
 
@@ -304,6 +304,18 @@ void Engine::process (float* left, float* right, int numSamples) noexcept
                 left[s] = l;
             }
         }
+    }
+
+    if (clearing_)
+    {
+        bool stillFading = false;
+
+        for (const auto& n : notches_)
+            if (n.active && n.gainDb < -0.02f)
+                stillFading = true;
+
+        if (! stillFading)
+            clearing_ = false;
     }
 
     // ---- 4. GUI snapshot at ~20 Hz ----
@@ -634,6 +646,9 @@ void Engine::analyzeFrame() noexcept
     const float frameRate = (float) (sampleRate_ / (double) kHop);
     const int attackFrames = std::max (2, (int) std::lround (params_.attackMs * 0.001f * frameRate));
     const int releaseFrames = std::max (2, (int) std::lround (params_.releaseMs * 0.001f * frameRate));
+    // A resonance that already dominates the mix and is still climbing does not
+    // have to sit out the whole attack window: that is the audible case.
+    const int fastFrames = std::max (2, attackFrames / 4);
 
     bool seen[kMaxTracks] = {};
 
@@ -729,7 +744,7 @@ void Engine::analyzeFrame() noexcept
         }
 
         // ---- engage ----
-        if (track.notch < 0 && ! clearing_ && track.evidence >= (float) attackFrames)
+        if (track.notch < 0 && ! clearing_ && track.evidence >= (float) fastFrames)
         {
             // growth over the last half of the attack window: a howl keeps
             // climbing, a played note has settled by then
@@ -751,7 +766,19 @@ void Engine::analyzeFrame() noexcept
                               || aiTrust
                               || (! musical && (rising || (strongPeak && aboveProgramme >= -6.0f)));
 
-            if (trusted)
+            // Fast lane: dominant, climbing, clearly not a played note. The
+            // narrowness and harmonic checks have already rejected music, so
+            // cutting after a quarter of the attack time is safe here and is
+            // what makes the suppressor feel immediate on stage.
+            const bool urgent = ! musical
+                             && track.prominence >= params_.sensitivityDb + 12.0f
+                             && aboveProgramme >= 0.0f
+                             && track.rise > 2.0f;
+
+            const bool ready = track.evidence >= (float) attackFrames
+                            || (urgent && track.evidence >= (float) fastFrames);
+
+            if (ready && trusted)
                 allocateNotch (t);
         }
 
@@ -765,10 +792,10 @@ void Engine::analyzeFrame() noexcept
             {
                 const float diff = track.freq - notch.freq;
                 if (std::abs (diff) > 2.0f)
-                    notch.freq += 0.25f * diff; // slow retune, no zipper
+                    notch.freq += 0.15f * diff; // slow retune, no zipper
 
                 if (params_.autoQ && track.q > 0.0f)
-                    notch.q += 0.10f * (std::clamp (track.q, 6.0f, 32.0f) - notch.q);
+                    notch.q += 0.10f * (std::clamp (track.q, kMinAutoQ, kMaxAutoQ) - notch.q);
             }
 
             if (params_.mode == Mode::Dynamic
@@ -878,7 +905,10 @@ void Engine::refineTracks() noexcept
 
         track.freq += 0.5f * (refined - track.freq);
 
-        // -6 dB width of the fine peak -> automatic notch Q
+        // -6 dB width of the fine peak -> automatic notch Q.
+        // The measured width always contains the analysis window (a Hann
+        // mainlobe is about two bins wide), so subtract that first: otherwise
+        // every low resonance looks broad and gets a notch that eats the voice.
         const float half = peakDb - 6.0f;
         int l = peak;
         int r = peak;
@@ -889,8 +919,9 @@ void Engine::refineTracks() noexcept
         while (r < maxBin && (r - peak) < 24 && fineDb_[(size_t) r + 1] > half)
             ++r;
 
-        const float widthHz = (float) ((double) (r - l) * binHz);
-        const float qEst = std::clamp (track.freq / std::max (widthHz, (float) binHz), 6.0f, 32.0f);
+        const float measuredHz = (float) ((double) (r - l) * binHz);
+        const float widthHz    = std::max (measuredHz - 2.0f * (float) binHz, 0.5f * measuredHz);
+        const float qEst = std::clamp (track.freq / std::max (widthHz, 0.25f), kMinAutoQ, kMaxAutoQ);
         track.q = track.q <= 0.0f ? qEst : 0.85f * track.q + 0.15f * qEst;
     }
 }
@@ -962,10 +993,11 @@ void Engine::allocateNotch (int trackIndex) noexcept
     if (notch.active && notch.track >= 0 && notch.track != trackIndex)
         tracks_[(size_t) notch.track].notch = -1;
 
-    // Adaptive attenuation: a peak that barely crosses the threshold gets a
-    // shallower cut than a howl that dominates the programme.
-    const float excess = std::clamp ((track.prominence - params_.sensitivityDb) / 18.0f, 0.0f, 1.0f);
-    const float depth  = std::abs (params_.depthDb) * (0.8f + 0.2f * excess);
+    // Adaptive attenuation: cut only as deep as this resonance actually stands
+    // out of the local floor, plus a small margin. A fixed maximum cut on a peak
+    // that barely crosses the threshold removes voice that never howled.
+    const float needed = track.prominence + 4.0f;
+    const float depth  = std::clamp (needed, 6.0f, std::abs (params_.depthDb));
 
     notch = Notch {};
     notch.active   = true;
@@ -974,7 +1006,7 @@ void Engine::allocateNotch (int trackIndex) noexcept
     notch.targetDb = -depth;
     notch.levelDb  = track.levelDb;
     notch.q        = params_.autoQ
-                       ? std::clamp (track.q > 0.0f ? track.q : params_.q, 6.0f, 32.0f)
+                       ? std::clamp (track.q > 0.0f ? track.q : params_.q, kMinAutoQ, kMaxAutoQ)
                        : params_.q;
     notch.track    = trackIndex;
     notch.age      = frameCount_;

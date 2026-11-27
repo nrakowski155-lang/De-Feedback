@@ -135,7 +135,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DeFeedbackAudioProcessor::cr
 
     params.push_back (std::make_unique<AudioParameterFloat> (
         ParameterID { "attack", 1 }, "Attack",
-        skewedRange (10.0f, 2000.0f, 300.0f), 250.0f,
+        skewedRange (10.0f, 2000.0f, 120.0f), 60.0f,
         AudioParameterFloatAttributes().withLabel ("ms")));
 
     params.push_back (std::make_unique<AudioParameterFloat> (

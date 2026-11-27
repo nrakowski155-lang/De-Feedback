@@ -29,7 +29,9 @@ struct Parameters
     int   maxNotches    = 8;      // 1 .. 12
     float depthDb       = 18.0f;  // notch depth (adaptive: 80 .. 100 % of this)
     float q             = 16.0f;  // manual notch width, or upper bound when autoQ
-    float attackMs      = 250.0f; // how long a peak must persist before it is cut
+    float attackMs      = 60.0f;  // how long a peak must persist before it is cut
+                                  // (a dominant, climbing howl is cut sooner: see
+                                  //  the fast lane in analyzeFrame)
     float releaseMs     = 2500.0f;// dynamic mode only
     float lowFreq       = 40.0f;
     float highFreq      = 16000.0f;
@@ -89,7 +91,10 @@ public:
     static constexpr int kMaxTracks   = 32;
     static constexpr int kMaxNotches  = 12;
     static constexpr int kDisplayBins = 1024;
-    static constexpr int kConfirmEvery = 16;           // ~85 ms at 48 kHz
+    static constexpr int kConfirmEvery = 4;            // ~21 ms at 48 kHz: exact
+                                                       // frequency and Q early
+    static constexpr float kMinAutoQ   = 10.0f;        // narrow, voice-safe notches
+    static constexpr float kMaxAutoQ   = 30.0f;
 
     Engine();
     ~Engine() = default;

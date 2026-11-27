@@ -108,7 +108,7 @@ Angehängt werden `De-Feedback-Installer.pkg` (Bootstrap), `De-Feedback.pkg`
 
 * 2048-Punkt-FFT mit 256-Sample-Hop (5,33 ms Analyseintervall, 23 Hz
   Bin-Breite bei 48 kHz)
-* 4096-Punkt-Bestätigungs-FFT alle 16 Hops (~85 ms): verfeinert die Frequenz
+* 4096-Punkt-Bestätigungs-FFT alle 4 Hops (~21 ms): verfeinert die Frequenz
   (im Test 0,3 Hz Fehler bei 1237,4 Hz) und misst die Peak-Breite
 * lokaler Spektralboden als 1/3-Oktav-Mittelwert, damit auch im vollen Mix ein
   schmaler Peak auffällt
@@ -118,8 +118,9 @@ Angehängt werden `De-Feedback-Installer.pkg` (Bootstrap), `De-Feedback.pkg`
   es mit hoher Wahrscheinlichkeit ein Instrument und kein Feedback
 * **Wachstums-Test**: ein Howl baut sich über die Zeit auf, ein gehaltener Ton
   nicht; gemessen über die halbe Attack-Zeit
-* **Pegel-Gate** gegen Rauschen und **Music Guard** (Dominiert der Peak das
-  Programm? Liegt er über dem Programm-RMS?)
+* **Schnellspur**: dominiert der Peak schon das Programm, liegt er deutlich über
+  der Schwelle und steigt er noch, wird er nach einem Viertel der Attack-Zeit
+  gesetzt statt nach der vollen (im Test ~40 ms bis zur ersten Absenkung)
 * **ResonanceAI-Bandmaske** (optional): 64 Bänder × 256 Frames, asynchron im
   Worker-Thread berechnet, kann die Evidenz um bis zu +8 dB verstärken und bei
   ≥ 70 % Konfidenz den Music Guard überstimmen – aber nie eine Erkennung
@@ -129,11 +130,13 @@ Angehängt werden `De-Feedback-Installer.pkg` (Bootstrap), `De-Feedback.pkg`
 
 * bis zu **12** dynamische Kerbfilter, gekoppelt stereo (links = rechts)
 * RBJ-Peaking-Biquads; **automatischer Q** aus der gemessenen Peak-Breite
-  (6–32, der WIDTH-Regler ist dann die Obergrenze) oder fester Q
-* **adaptive Tiefe**: 80–100 % der eingestellten Tiefe, je nachdem wie weit der
-  Peak über der Schwelle liegt
-* Tiefe bis −36 dB, Ein-/Ausblenden mit 30/80 ms (kein Klicken)
-* Frequenzgrenzen (Low/High) gegen Bass und Hiss
+  (10–30, der WIDTH-Regler ist dann die Obergrenze) oder fester Q. Die
+  Analysfenster-Breite wird vorher abgezogen, damit tiefe Resonanzen keine
+  breite Kerbe und damit keine Stimme mitnehmen
+* **adaptive Tiefe**: nur so tief wie nötig (Prominenz + 4 dB, begrenzt durch
+  den Depth-Regler)
+* Tiefe bis −36 dB, Ein-/Ausblenden mit 12/80 ms; die Filterkoeffizienten
+  werden alle 32 Samples erneuert (schnell und trotzdem klickfrei)
 * Notches werden bei Bedarf nachgeführt (langsame Retune) und bei vollem
   Speicher nur dann ersetzt, wenn der alte Howl nicht mehr aktiv ist
 
@@ -329,7 +332,7 @@ g++ -O2 -std=c++20 -I Source/dsp demo/render_demo.cpp \
 
 1. Plugin auf den Kanal, in dem die Kopplung entsteht (meist Gesangsmikrofon
    bzw. Monitor-Bus), **nicht** auf den Master.
-2. Modus **HUNT**, Depth ca. 18 dB, Q ca. 16, Attack 250 ms, Music Guard an.
+2. Modus **HUNT**, Depth ca. 18 dB, Q ca. 16, Attack 60 ms, Music Guard an.
 3. Monitore auf Show-Pegel, Gain langsam aufdrehen, bis es pfeift. Das Plugin
    setzt pro Frequenz einen Notch und hält ihn.
 4. Vor dem nächsten Song ggf. **CLEAR** – danach HUNT einfach stehen lassen.
@@ -346,9 +349,9 @@ einsetzbar.
 | Mode | Off / Hunt / Dynamic | Hunt | Betriebsart |
 | Sensitivity | 3–24 dB | 9 dB | Wie weit muss ein Peak über dem lokalen Spektralboden liegen? |
 | Notches | 1–12 | 8 | Maximale Anzahl Kerbfilter |
-| Depth | 3–36 dB | 18 dB | Maximale Absenkung pro Notch (adaptiv 80–100 %) |
+| Depth | 3–36 dB | 18 dB | Maximale Absenkung pro Notch (adaptiv: so tief wie nötig) |
 | Width (Q) | 2–48 | 16 | Höher = schmaler; bei Auto Q die Obergrenze |
-| Attack | 10–2000 ms | 250 ms | Wie lange muss ein Peak bestehen? |
+| Attack | 10–2000 ms | 60 ms | Wie lange muss ein Peak bestehen? (dominante, steigende Howls früher) |
 | Release | 0,1–20 s | 2,5 s | Nur im Dynamic-Modus |
 | Low / High | 30–800 Hz / 2–20 kHz | 40 Hz / 16 kHz | Analyse- und Filterbereich |
 | Music Guard | an/aus | an | Harmonischen-/Wachstums-/Pegelprüfung |
