@@ -187,7 +187,9 @@ jobs:
       - name: Verify download link
         if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: |
-          repo_code="$(curl -s -o /dev/null -w '%{http_code}' "https://api.github.com/repos/${GITHUB_REPOSITORY}")"
+          # The HTML page is authoritative here: the anonymous REST API is rate
+          # limited from shared runner IPs and answers 403, not 404.
+          repo_code="$(curl -sL -o /dev/null -w '%{http_code}' "https://github.com/${GITHUB_REPOSITORY}")"
           asset="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/De-Feedback-Installer.pkg"
           asset_code=""
           for attempt in 1 2 3 4 5; do
@@ -202,7 +204,7 @@ jobs:
             exit 1
           fi
           if [ "${repo_code}" != "200" ]; then
-            echo "::warning::Repository ist privat – der Download-Link bleibt für anonyme Aufrufe 404."
+            echo "::warning::Repository ist für anonyme Aufrufe nicht erreichbar (HTTP ${repo_code}) – der Download-Link bleibt dann 404."
           fi
 
       - name: Publish versioned release
