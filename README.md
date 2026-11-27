@@ -132,11 +132,20 @@ neu starten.
 
 `.github/workflows/build-macos.yml` läuft bei jedem Push auf `main`, bei Pull
 Requests und manuell (`workflow_dispatch`). Der Job baut auf `macos-15` ein
-Universal-Binary (arm64 + x86_64), führt die DSP-Tests aus, prüft das AU mit
-`auval` und lädt zwei ZIPs als Artifact hoch:
+Universal-Binary (arm64 + x86_64), führt die DSP-Tests aus, installiert das AU
+über `scripts/install-macos.sh`, validiert es mit `auval`, deinstalliert es
+wieder über `scripts/uninstall-macos.sh`, baut Installer-/Deinstaller-Pakete und
+lädt alles als Artifact hoch:
 
 * `De-Feedback-AU-macOS-universal.zip`
 * `De-Feedback-VST3-macOS-universal.zip`
+* `De-Feedback-<version>.pkg` (Installer, systemweit)
+* `De-Feedback-Uninstall-<version>.pkg` (Deinstaller)
+
+Zusätzlich prüft der Lauf die Skripte (`bash -n`) und führt einen Smoke-Test der
+Trainings-Pipeline aus: 12 synthetische Patches mit Shape-, Wertebereichs- und
+Positiv-Label-Prüfung. Damit ist `training/synthesize.py` nicht nur syntaktisch
+abgesichert.
 
 Die Bundles werden ad-hoc signiert (`codesign -s -`), aber **nicht notarisiert**.
 Nach dem Download aus GitHub die Quarantäne entfernen:
@@ -163,6 +172,47 @@ Für VST3 und Standalone baut derselbe Befehl auch ohne Apple-Toolchain
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j 8
 ```
+
+### Installation (Skript oder .pkg)
+
+**Skript** – findet das gebaute Bundle automatisch, kopiert AU und VST3,
+entfernt die Quarantäne, signiert ad-hoc und validiert das AU:
+
+```bash
+./scripts/install-macos.sh
+./scripts/install-macos.sh --from ~/Downloads/De-Feedback-AU-macOS-universal.zip
+./scripts/install-macos.sh --system          # /Library, mit sudo
+```
+
+Optionen: `--sign "Developer ID Application: …"` für eine echte Signatur,
+`--skip-auval`, `--help`. Ohne `--system` landet alles in
+`~/Library/Audio/Plug-Ins/…` – dafür ist kein sudo nötig.
+
+**Paket** – aus demselben Build, inklusive Deinstaller:
+
+```bash
+./scripts/build-pkg.sh
+# dist/De-Feedback-1.1.0.pkg
+# dist/De-Feedback-Uninstall-1.1.0.pkg
+
+sudo installer -pkg dist/De-Feedback-1.1.0.pkg -target /
+```
+
+Das Installer-Paket legt AU und VST3 systemweit unter
+`/Library/Audio/Plug-Ins/…` ab, das payload-free Deinstaller-Paket entfernt
+beide wieder. Mit `--sign "Developer ID Installer: …"` werden die Pakete
+signiert; ohne Zertifikat sind sie unsigniert (lokal trotzdem installierbar).
+
+**Deinstallieren:**
+
+```bash
+./scripts/uninstall-macos.sh            # Benutzerinstallation
+./scripts/uninstall-macos.sh --system   # /Library
+./scripts/uninstall-macos.sh --all      # beides
+```
+
+Ein trainiertes KI-Modell unter `~/Library/Application Support/ResonanceAI/`
+bleibt bewusst erhalten – das sind Nutzerdaten, keine Plugin-Dateien.
 
 ---
 

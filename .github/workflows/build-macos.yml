@@ -34,6 +34,35 @@ jobs:
           python3 -m py_compile training/*.py
           echo "training scripts parse"
 
+      - name: Check helper scripts (syntax)
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+          echo "installer scripts parse"
+
+      - name: Smoke test training pipeline
+        run: |
+          python3 -m venv .venv-training
+          . .venv-training/bin/activate
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy
+          python training/synthesize.py --patches 12 --seed 1 --out /tmp/resonanceai_smoke.npz
+          python - <<'PY'
+          import numpy as np
+
+          data = np.load("/tmp/resonanceai_smoke.npz")
+          x, y, c = data["x"], data["y"], data["c"]
+
+          assert x.shape == (12, 64, 256), x.shape
+          assert y.shape == (12, 64), y.shape
+          assert c.shape == (12,), c.shape
+          assert x.min() >= 0.0 and x.max() <= 1.0
+          assert y.min() >= 0.0 and y.max() <= 1.0
+          assert (c > 0).any(), "smoke sample contains no positive patch"
+          print("training smoke OK:", x.shape, "positives:", int((c > 0).sum()))
+          PY
+
       - name: Configure
         run: |
           cmake -B build \
@@ -59,13 +88,22 @@ jobs:
           codesign --force --deep --sign - build/DeFeedback_artefacts/Release/VST3/De-Feedback.vst3
           codesign --verify --deep --strict --verbose=2 build/DeFeedback_artefacts/Release/AU/De-Feedback.component
 
-      - name: Validate Audio Unit with auval
+      - name: Install with the installer script and validate AU
         run: |
-          sudo mkdir -p /Library/Audio/Plug-Ins/Components
-          sudo cp -R build/DeFeedback_artefacts/Release/AU/De-Feedback.component /Library/Audio/Plug-Ins/Components/
-          killall -9 AudioComponentRegistrar 2>/dev/null || true
-          sleep 2
-          auval -v aufx Dfb1 Dfbk
+          ./scripts/install-macos.sh --system --from build/DeFeedback_artefacts/Release
+
+      - name: Uninstall with the uninstaller script
+        run: |
+          ./scripts/uninstall-macos.sh --system
+
+      - name: Build installer packages
+        run: |
+          ./scripts/build-pkg.sh --from build/DeFeedback_artefacts/Release --out artifacts
+          ls -lh artifacts
+          for pkg in artifacts/*.pkg; do
+            echo "--- $pkg"
+            pkgutil --payload-files "$pkg" 2>/dev/null | sed -n '1,8p' || true
+          done
 
       - name: Package
         if: always()
@@ -88,6 +126,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: De-Feedback-macOS
-          path: artifacts/*.zip
+          path: |
+            artifacts/*.zip
+            artifacts/*.pkg
           if-no-files-found: warn
           retention-days: 30
