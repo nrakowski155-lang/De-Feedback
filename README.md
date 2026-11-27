@@ -23,26 +23,40 @@ und [docs/resonance-ai.md](docs/resonance-ai.md).
 
 ## Download & automatische Installation
 
-**Ein Paket, alles automatisch:** [De-Feedback-Installer.pkg](https://github.com/nrakowski155-lang/De-Feedback/releases/latest/download/De-Feedback-Installer.pkg)
-herunterladen und öffnen. Das kleine Bootstrap-Paket holt sich **während der
-Installation** die aktuellen AU-/VST3-Bundles aus dem neuesten GitHub-Release,
-prüft die SHA-256-Summen und installiert beide unter
+**Ein Paket, alles automatisch:** [De-Feedback-Installer.pkg herunterladen](https://github.com/nrakowski155-lang/De-Feedback/releases/latest/download/De-Feedback-Installer.pkg)
+
+Öffnen, installieren, fertig. Das kleine Bootstrap-Paket holt sich **während
+der Installation** die aktuellen AU-/VST3-Bundles aus dem neuesten
+GitHub-Release, prüft die SHA-256-Summen und installiert beide unter
 `/Library/Audio/Plug-Ins/…`. Es enthält selbst keine Plug-ins und bleibt daher
 nur wenige Kilobyte groß.
 
-> **Voraussetzung:** Das Paket lädt anonym von GitHub – das funktioniert nur,
-> wenn das Repository öffentlich ist. Bei einem privaten Repository schlägt der
-> Download im Installer fehl (Log: `/var/log/defeedback-bootstrap.log`). Dann
-> entweder `./scripts/install-latest.sh` mit `gh auth login` verwenden oder das
-> vollständige `De-Feedback.pkg` aus dem Release laden, das beide Plug-ins
-> direkt enthält.
+> ### Wenn der Link 404 meldet
+>
+> GitHub antwortet mit **404 auf alles**, was in einem **privaten** Repository
+> liegt – auch auf Release-Dateien. Der Link ist dann nicht kaputt, die Datei
+> ist ohne Anmeldung nur unsichtbar. Zwei Wege:
+>
+> **A. Repository öffentlich machen** – danach funktioniert der Link dauerhaft
+> für alle: Settings → General → ganz unten *Danger Zone* →
+> *Change repository visibility* → *Make public*. Anschließend den
+> [CI-Lauf](https://github.com/nrakowski155-lang/De-Feedback/actions/workflows/build-macos.yml)
+> abwarten (ca. 10 Minuten); er legt das Release `latest` mit dem Paket an.
+>
+> **B. Ohne die Sichtbarkeit zu ändern:** im
+> [Actions-Lauf](https://github.com/nrakowski155-lang/De-Feedback/actions/workflows/build-macos.yml)
+> den neuesten grünen Lauf öffnen und unten unter *Artifacts*
+> `De-Feedback-macOS` herunterladen. Darin liegen `De-Feedback.pkg` (enthält
+> beide Plug-ins direkt) und `De-Feedback-Installer.pkg`. Das Herunterladen aus
+> Actions verlangt eine GitHub-Anmeldung, die Installation danach nicht mehr.
 
 Der Link zeigt auf das Rolling-Release `latest`, das bei jedem Push auf `main`
 aktualisiert wird. Ein Tag wie `v1.1.0` erzeugt zusätzlich ein versioniertes
 Release. Paket und Bundles sind ad-hoc signiert und nicht notarisiert – beim
 ersten Öffnen ggf. Rechtsklick → **Öffnen**.
 
-**Alternativ per Skript** (funktioniert auch mit privatem Repository):
+**Alternativ per Skript** (der `curl`-Download unten braucht ein öffentliches
+Repository – bei einem privaten das Repo klonen und das Skript lokal starten):
 
 ```bash
 curl -fsSL -o install-latest.sh \
