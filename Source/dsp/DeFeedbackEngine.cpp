@@ -3,6 +3,24 @@
 namespace defb
 {
 
+namespace
+{
+    inline float normalisedDb (float db) noexcept
+    {
+        return std::clamp ((db + 100.0f) / 100.0f, 0.0f, 1.0f);
+    }
+
+    inline double mel (double f) noexcept
+    {
+        return 2595.0 * std::log10 (1.0 + f / 700.0);
+    }
+
+    inline double inverseMel (double m) noexcept
+    {
+        return 700.0 * (std::pow (10.0, m / 2595.0) - 1.0);
+    }
+}
+
 Engine::Engine()
 {
     prepare (48000.0, 512);
@@ -13,11 +31,39 @@ void Engine::prepare (double sampleRate, int maxBlockSize)
     sampleRate_ = sampleRate > 0.0 ? sampleRate : 48000.0;
     maxBlock_   = std::max (1, maxBlockSize);
 
-    // Hann analysis window
+    // Hann analysis windows
     for (int i = 0; i < kFftSize; ++i)
     {
         const double w = 0.5 - 0.5 * std::cos (2.0 * Fft::kPi * (double) i / (double) (kFftSize - 1));
         window_[(size_t) i] = (float) w;
+    }
+
+    for (int i = 0; i < kFineSize; ++i)
+    {
+        const double w = 0.5 - 0.5 * std::cos (2.0 * Fft::kPi * (double) i / (double) (kFineSize - 1));
+        windowFine_[(size_t) i] = (float) w;
+    }
+
+    // 64 mel/log bands from 100 Hz to min(16 kHz, 0.45 fs) - the AI model input.
+    const double fLow  = std::min ((double) ai::kDefaultLowBandHz, sampleRate_ * 0.4);
+    const double fHigh = std::min ((double) ai::kDefaultHighBandHz, sampleRate_ * 0.45);
+    const double mLow  = mel (fLow);
+    const double mHigh = mel (fHigh);
+    const double binHz = sampleRate_ / (double) kFftSize;
+
+    std::array<double, kNumBands + 1> edges {};
+
+    for (int b = 0; b <= kNumBands; ++b)
+        edges[(size_t) b] = inverseMel (mLow + (mHigh - mLow) * (double) b / (double) kNumBands);
+
+    for (int b = 0; b < kNumBands; ++b)
+    {
+        const int lo = std::clamp ((int) std::floor (edges[(size_t) b] / binHz), 1, kNumBins - 2);
+        const int hi = std::clamp ((int) std::ceil (edges[(size_t) b + 1] / binHz), lo, kNumBins - 2);
+
+        bandLo_[(size_t) b]   = lo;
+        bandHi_[(size_t) b]   = hi;
+        bandFreq_[(size_t) b] = (float) (0.5 * (edges[(size_t) b] + edges[(size_t) b + 1]));
     }
 
     reset();
@@ -26,16 +72,25 @@ void Engine::prepare (double sampleRate, int maxBlockSize)
 void Engine::reset()
 {
     hist_.fill (0.0f);
+    histFine_.fill (0.0f);
     re_.fill (0.0f);
     im_.fill (0.0f);
+    reFine_.fill (0.0f);
+    imFine_.fill (0.0f);
     db_.fill (-120.0f);
     floorDb_.fill (-120.0f);
+    fineDb_.fill (-120.0f);
     prefix_.fill (0.0f);
 
-    histPos_    = 0;
-    hopCount_   = 0;
-    frameCount_ = 0;
-    clearing_   = false;
+    for (auto& frame : patch_)
+        frame.fill (0.0f);
+
+    histPos_     = 0;
+    histFinePos_ = 0;
+    hopCount_    = 0;
+    frameCount_  = 0;
+    patchWrite_  = 0;
+    clearing_    = false;
 
     for (auto& t : tracks_)
         t = Track {};
@@ -47,6 +102,15 @@ void Engine::reset()
         n.state[1].reset();
     }
 
+    aiQueue_.clear();
+    latestMask_   = ai::Mask {};
+    haveMask_     = false;
+    maskFresh_    = false;
+    maskStampMs_  = 0;
+    aiConfidence_ = 0.0f;
+    aiModel_      = ai::kModelNone;
+
+    publishPatch();
     publishSnapshot();
 }
 
@@ -120,7 +184,10 @@ void Engine::clearNotches() noexcept
 void Engine::pushSample (float s) noexcept
 {
     hist_[(size_t) histPos_] = s;
-    histPos_                 = (histPos_ + 1) % kFftSize;
+    histPos_ = (histPos_ + 1) % kFftSize;
+
+    histFine_[(size_t) histFinePos_] = s;
+    histFinePos_ = (histFinePos_ + 1) % kFineSize;
 }
 
 void Engine::process (float* left, float* right, int numSamples) noexcept
@@ -187,7 +254,7 @@ void Engine::process (float* left, float* right, int numSamples) noexcept
             continue;
         }
 
-        n.coeffs = makePeaking (sampleRate_, (double) n.freq, (double) params_.q, (double) n.gainDb);
+        n.coeffs = makePeaking (sampleRate_, (double) n.freq, (double) n.q, (double) n.gainDb);
         ++activeCount;
     }
 
@@ -247,9 +314,139 @@ void Engine::process (float* left, float* right, int numSamples) noexcept
     }
 }
 
+void Engine::absorbAiMasks() noexcept
+{
+    ai::Mask incoming;
+
+    while (aiQueue_.pop (incoming))
+    {
+        latestMask_  = incoming;
+        haveMask_    = true;
+        maskStampMs_ = incoming.timestampMs;
+    }
+
+    maskFresh_ = haveMask_
+              && (ai::nowMs() - maskStampMs_) <= (int64_t) ai::kMaskStaleMs;
+
+    if (! haveMask_)
+    {
+        aiConfidence_ = 0.0f;
+        aiModel_      = ai::kModelNone;
+        return;
+    }
+
+    aiModel_ = latestMask_.model;
+
+    if (! maskFresh_)
+    {
+        aiConfidence_ = 0.0f;
+        return;
+    }
+
+    float peak = 0.0f;
+    for (int b = 0; b < kNumBands; ++b)
+        peak = std::max (peak, std::clamp (latestMask_.confidence[b], 0.0f, 1.0f));
+
+    aiConfidence_ = peak;
+}
+
+void Engine::fillPatchFrame() noexcept
+{
+    auto& frame = patch_[(size_t) patchWrite_];
+
+    for (int b = 0; b < kNumBands; ++b)
+    {
+        float level = -120.0f;
+
+        for (int k = bandLo_[(size_t) b]; k <= bandHi_[(size_t) b]; ++k)
+            level = std::max (level, db_[(size_t) k]);
+
+        frame[(size_t) b] = normalisedDb (level);
+    }
+
+    patchWrite_ = (patchWrite_ + 1) % kPatchFrames;
+}
+
+void Engine::publishPatch() noexcept
+{
+    const uint32_t seq = patchSeq_.load (std::memory_order_relaxed);
+    patchSeq_.store (seq + 1, std::memory_order_release); // odd: writing
+
+    auto& dst = patchSnapshot_[patchIndex_.load (std::memory_order_relaxed)];
+
+    for (int t = 0; t < kPatchFrames; ++t)
+    {
+        const int src = (patchWrite_ + t) % kPatchFrames;
+
+        for (int b = 0; b < kNumBands; ++b)
+            dst[(size_t) b * (size_t) kPatchFrames + (size_t) t] = patch_[(size_t) src][(size_t) b];
+    }
+
+    patchSeq_.store (seq + 2, std::memory_order_release); // even: readable
+    patchIndex_ ^= 1;
+    patchRevision_.fetch_add (1, std::memory_order_release);
+}
+
+int Engine::copyAiPatch (float* out, int maxFloats) const noexcept
+{
+    if (out == nullptr || maxFloats <= 0)
+        return 0;
+
+    const int n = std::min (maxFloats, kPatchSize);
+
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const uint32_t s1 = patchSeq_.load (std::memory_order_acquire);
+        if (s1 & 1u)
+            continue;
+
+        const auto& src = patchSnapshot_[patchIndex_.load (std::memory_order_relaxed) ^ 1];
+
+        std::memcpy (out, src.data(), sizeof (float) * (size_t) n);
+
+        const uint32_t s2 = patchSeq_.load (std::memory_order_acquire);
+        if (s1 == s2)
+            return n;
+    }
+
+    return 0;
+}
+
+void Engine::postAiMask (const ai::Mask& mask) noexcept
+{
+    aiQueue_.push (mask); // full queue: drop the message, never block
+}
+
+int Engine::getBandForFrequency (float freq) const noexcept
+{
+    if (freq <= bandFreq_[0])
+        return 0;
+
+    if (freq >= bandFreq_[(size_t) kNumBands - 1])
+        return kNumBands - 1;
+
+    int best = 0;
+    float bestDistance = 1.0e9f;
+
+    for (int b = 0; b < kNumBands; ++b)
+    {
+        const float distance = std::abs (std::log2 (freq / std::max (bandFreq_[(size_t) b], 1.0f)));
+
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            best         = b;
+        }
+    }
+
+    return best;
+}
+
 void Engine::analyzeFrame() noexcept
 {
-    const double binHz = sampleRate_ / (double) kFftSize;
+    absorbAiMasks();
+
+    const double binHz  = sampleRate_ / (double) kFftSize;
     const int    minBin = std::max (2, (int) std::ceil ((double) params_.lowFreq / binHz));
     const int    maxBin = std::min (kNumBins - 2, (int) std::floor ((double) params_.highFreq / binHz));
 
@@ -279,8 +476,18 @@ void Engine::analyzeFrame() noexcept
         const float re = re_[(size_t) k];
         const float im = im_[(size_t) k];
         const float mag = std::sqrt (re * re + im * im) * norm;
-        float db = 20.0f * std::log10 (mag + 1.0e-9f);
-        db_[((size_t) k)] = std::max (db, -120.0f);
+        const float db = 20.0f * std::log10 (mag + 1.0e-9f);
+        db_[(size_t) k] = std::max (db, -120.0f);
+    }
+
+    fillPatchFrame();
+
+    const bool confirmFrame = (frameCount_ % kConfirmEvery) == 0;
+
+    if (confirmFrame)
+    {
+        refineTracks();
+        publishPatch();
     }
 
     // fractional-octave floor (centre bins excluded so the peak cannot hide itself)
@@ -359,7 +566,8 @@ void Engine::analyzeFrame() noexcept
         return matches >= 2;
     };
 
-    // ---- peak picking ----
+    // ---- peak picking (with the optional AI band mask as extra evidence) ----
+    const bool aiOn = params_.aiAssist && maskFresh_;
     int numCandidates = 0;
 
     for (int k = minBin; k <= maxBin && numCandidates < (int) candidates_.size(); ++k)
@@ -372,7 +580,18 @@ void Engine::analyzeFrame() noexcept
         if (level <= db_[(size_t) k - 1] || level < db_[(size_t) k + 1])
             continue;
 
-        const float prominence = level - floorDb_[(size_t) k];
+        float prominence = level - floorDb_[(size_t) k];
+        float aiConfidence = 0.0f;
+
+        if (aiOn)
+        {
+            const int band = getBandForFrequency ((float) ((double) k * binHz));
+            aiConfidence = std::clamp (latestMask_.confidence[band], 0.0f, 1.0f);
+
+            if (aiConfidence > ai::kAiBoostFloor)
+                prominence += ai::kAiBoostDb * (aiConfidence - ai::kAiBoostFloor)
+                                              / (1.0f - ai::kAiBoostFloor);
+        }
 
         if (prominence < params_.sensitivityDb)
             continue;
@@ -394,9 +613,10 @@ void Engine::analyzeFrame() noexcept
             delta = std::clamp (0.5f * (a - c) / denom, -0.5f, 0.5f);
 
         Candidate cand;
-        cand.freq       = (float) (((double) k + (double) delta) * binHz);
-        cand.levelDb    = b - 0.25f * (a - c) * delta;
-        cand.prominence = cand.levelDb - floorDb_[(size_t) k];
+        cand.freq         = (float) (((double) k + (double) delta) * binHz);
+        cand.levelDb      = b - 0.25f * (a - c) * delta;
+        cand.prominence   = cand.levelDb - floorDb_[(size_t) k];
+        cand.aiConfidence = aiConfidence;
 
         if (numCandidates > 0
             && std::abs (candidates_[(size_t) numCandidates - 1].freq - cand.freq) < 2.0f * (float) binHz)
@@ -453,6 +673,7 @@ void Engine::analyzeFrame() noexcept
                     track.evidence     = 1.0f;
                     track.lastSeen     = frame;
                     track.rise         = 0.0f;
+                    track.aiConfidence = cand.aiConfidence;
                     track.histPos      = 0;
                     track.histCount    = 1;
                     for (float& h : track.levelHist)
@@ -472,6 +693,7 @@ void Engine::analyzeFrame() noexcept
             track.prominence = cand.prominence;
             track.evidence   = std::min (track.evidence + 1.0f, (float) attackFrames * 2.0f);
             track.lastSeen   = frame;
+            track.aiConfidence += 0.35f * (cand.aiConfidence - track.aiConfidence);
 
             track.levelHist[(size_t) track.histPos] = cand.levelDb;
             track.histPos = (track.histPos + 1) % 32;
@@ -497,6 +719,7 @@ void Engine::analyzeFrame() noexcept
         {
             track.evidence = std::max (0.0f, track.evidence - 1.5f);
             track.rise     = std::max (0.0f, track.rise - 0.5f);
+            track.aiConfidence *= 0.85f;
         }
         // keep a track alive as long as it owns a notch
         if (track.evidence <= 0.0f && track.notch < 0)
@@ -520,9 +743,12 @@ void Engine::analyzeFrame() noexcept
             const float aboveProgramme = track.levelDb - rmsDb;
             const bool  strongPeak     = track.prominence >= params_.sensitivityDb + 15.0f;
             const bool  musical        = looksHarmonic (track.freq, track.levelDb);
+            const bool  aiTrust        = aiOn && track.aiConfidence >= ai::kAiTrustThreshold;
 
-            // A howl either keeps climbing, or it stands far out of the mix.
+            // A howl either keeps climbing, stands far out of the mix, or the
+            // trained model is confident that this band is feedback.
             const bool trusted = ! params_.musicGuard
+                              || aiTrust
                               || (! musical && (rising || (strongPeak && aboveProgramme >= -6.0f)));
 
             if (trusted)
@@ -540,6 +766,9 @@ void Engine::analyzeFrame() noexcept
                 const float diff = track.freq - notch.freq;
                 if (std::abs (diff) > 2.0f)
                     notch.freq += 0.25f * diff; // slow retune, no zipper
+
+                if (params_.autoQ && track.q > 0.0f)
+                    notch.q += 0.10f * (std::clamp (track.q, 6.0f, 32.0f) - notch.q);
             }
 
             if (params_.mode == Mode::Dynamic
@@ -566,6 +795,103 @@ void Engine::analyzeFrame() noexcept
 
         if (++used > maxNotches && n.targetDb < 0.0f)
             n.targetDb = 0.0f;
+    }
+}
+
+void Engine::refineTracks() noexcept
+{
+    bool any = false;
+
+    for (const auto& t : tracks_)
+        if (t.active)
+        {
+            any = true;
+            break;
+        }
+
+    if (! any)
+        return;
+
+    for (int i = 0; i < kFineSize; ++i)
+    {
+        const int idx = (histFinePos_ + i) % kFineSize;
+        reFine_[(size_t) i] = histFine_[(size_t) idx] * windowFine_[(size_t) i];
+        imFine_[(size_t) i] = 0.0f;
+    }
+
+    fftFine_.forward (reFine_.data(), imFine_.data());
+
+    const float  norm  = 4.0f / (float) kFineSize;
+    const double binHz = sampleRate_ / (double) kFineSize;
+    const int    minBin = std::max (2, (int) std::ceil ((double) params_.lowFreq / binHz));
+    const int    maxBin = std::min (kFineBins - 2, (int) std::floor ((double) params_.highFreq / binHz));
+
+    for (int k = 0; k < kFineBins; ++k)
+    {
+        const float re = reFine_[(size_t) k];
+        const float im = imFine_[(size_t) k];
+        const float mag = std::sqrt (re * re + im * im) * norm;
+        fineDb_[(size_t) k] = std::max (20.0f * std::log10 (mag + 1.0e-9f), -120.0f);
+    }
+
+    for (auto& track : tracks_)
+    {
+        if (! track.active)
+            continue;
+
+        const int centre = (int) std::lround ((double) track.freq / binHz);
+        const int lo = std::max (minBin + 1, centre - 3);
+        const int hi = std::min (maxBin - 1, centre + 3);
+
+        if (hi <= lo)
+            continue;
+
+        int   peak   = lo;
+        float peakDb = fineDb_[(size_t) lo];
+
+        for (int k = lo + 1; k <= hi; ++k)
+        {
+            if (fineDb_[(size_t) k] > peakDb)
+            {
+                peakDb = fineDb_[(size_t) k];
+                peak   = k;
+            }
+        }
+
+        if (peakDb < -75.0f)
+            continue;
+
+        const float a = fineDb_[(size_t) peak - 1];
+        const float b = peakDb;
+        const float c = fineDb_[(size_t) peak + 1];
+        const float denom = a - 2.0f * b + c;
+
+        float delta = 0.0f;
+        if (std::abs (denom) > 1.0e-5f)
+            delta = std::clamp (0.5f * (a - c) / denom, -0.5f, 0.5f);
+
+        const float refined = (float) (((double) peak + (double) delta) * binHz);
+
+        // only trust the confirmation when it lands on the tracked resonance
+        if (std::abs (refined - track.freq) > 45.0f)
+            continue;
+
+        track.freq += 0.5f * (refined - track.freq);
+
+        // -6 dB width of the fine peak -> automatic notch Q
+        const float half = peakDb - 6.0f;
+        int l = peak;
+        int r = peak;
+
+        while (l > minBin && (peak - l) < 24 && fineDb_[(size_t) l - 1] > half)
+            --l;
+
+        while (r < maxBin && (r - peak) < 24 && fineDb_[(size_t) r + 1] > half)
+            ++r;
+
+        const float widthHz = (float) ((double) (r - l) * binHz);
+        const float qEst = std::clamp (track.freq / std::max (widthHz, (float) binHz), 6.0f, 32.0f);
+        track.q = track.q <= 0.0f ? qEst : 0.85f * track.q + 0.15f * qEst;
     }
 }
 
@@ -636,12 +962,20 @@ void Engine::allocateNotch (int trackIndex) noexcept
     if (notch.active && notch.track >= 0 && notch.track != trackIndex)
         tracks_[(size_t) notch.track].notch = -1;
 
+    // Adaptive attenuation: a peak that barely crosses the threshold gets a
+    // shallower cut than a howl that dominates the programme.
+    const float excess = std::clamp ((track.prominence - params_.sensitivityDb) / 18.0f, 0.0f, 1.0f);
+    const float depth  = std::abs (params_.depthDb) * (0.8f + 0.2f * excess);
+
     notch = Notch {};
     notch.active   = true;
     notch.freq     = track.freq;
     notch.gainDb   = 0.0f;
-    notch.targetDb = -std::abs (params_.depthDb);
+    notch.targetDb = -depth;
     notch.levelDb  = track.levelDb;
+    notch.q        = params_.autoQ
+                       ? std::clamp (track.q > 0.0f ? track.q : params_.q, 6.0f, 32.0f)
+                       : params_.q;
     notch.track    = trackIndex;
     notch.age      = frameCount_;
     notch.state[0].reset();
@@ -669,7 +1003,7 @@ void Engine::publishSnapshot() noexcept
     const uint32_t seq = snapshotSeq_.load (std::memory_order_relaxed);
     snapshotSeq_.store (seq + 1, std::memory_order_release); // odd: writing
 
-    auto& snap = snapshot_[snapshotIndex_];
+    auto& snap = snapshot_[snapshotIndex_.load (std::memory_order_relaxed)];
 
     for (int k = 0; k < kDisplayBins; ++k)
     {
@@ -684,17 +1018,20 @@ void Engine::publishSnapshot() noexcept
         {
             snap.notchFreq[count] = n.freq;
             snap.notchGain[count] = n.gainDb;
+            snap.notchQ[count]    = n.q;
             ++count;
         }
     }
 
-    snap.numNotches  = count;
-    snap.hunting     = params_.mode == Mode::Off ? 0 : 1;
-    snap.sensitivity = params_.sensitivityDb;
-    snap.maxFreq     = (float) (sampleRate_ * 0.5);
+    snap.numNotches   = count;
+    snap.hunting      = params_.mode == Mode::Off ? 0 : 1;
+    snap.sensitivity  = params_.sensitivityDb;
+    snap.maxFreq      = (float) (sampleRate_ * 0.5);
+    snap.aiFresh      = (params_.aiAssist && maskFresh_) ? 1 : 0;
+    snap.aiModel      = aiModel_;
+    snap.aiConfidence = aiConfidence_;
 
     snapshotSeq_.store (seq + 2, std::memory_order_release); // even: readable
-
     snapshotIndex_ ^= 1;
 }
 
@@ -742,7 +1079,7 @@ int Engine::getNotchInfo (NotchInfo* out, int maxOut) const noexcept
         if (s1 & 1u)
             continue;
 
-        const auto& snap = snapshot_[snapshotIndex_ ^ 1];
+        const auto& snap = snapshot_[snapshotIndex_.load (std::memory_order_relaxed) ^ 1];
         result = std::min (snap.numNotches, maxOut);
 
         for (int i = 0; i < result; ++i)
@@ -750,6 +1087,7 @@ int Engine::getNotchInfo (NotchInfo* out, int maxOut) const noexcept
             out[i].freq    = snap.notchFreq[i];
             out[i].gainDb  = snap.notchGain[i];
             out[i].levelDb = -120.0f;
+            out[i].q       = snap.notchQ[i];
         }
 
         const uint32_t s2 = snapshotSeq_.load (std::memory_order_acquire);
@@ -775,6 +1113,31 @@ int Engine::getNumNotches() const noexcept
     }
 
     return 0;
+}
+
+AiState Engine::getAiState() const noexcept
+{
+    AiState state {};
+    state.patchRevision = getAiPatchRevision();
+
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        const uint32_t s1 = snapshotSeq_.load (std::memory_order_acquire);
+        if (s1 & 1u)
+            continue;
+
+        const auto& snap = snapshot_[snapshotIndex_.load (std::memory_order_relaxed) ^ 1];
+
+        state.maskFresh  = snap.aiFresh != 0;
+        state.confidence = snap.aiConfidence;
+        state.model      = snap.aiModel;
+
+        const uint32_t s2 = snapshotSeq_.load (std::memory_order_acquire);
+        if (s1 == s2)
+            return state;
+    }
+
+    return state;
 }
 
 } // namespace defb

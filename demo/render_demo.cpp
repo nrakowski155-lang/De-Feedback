@@ -5,7 +5,7 @@
 //   wet section  -> the same material through a fresh engine in HUNT mode
 //
 // Build & run:
-//   g++ -O2 -std=c++17 -I Source/dsp demo/render_demo.cpp
+//   g++ -O2 -std=c++20 -I Source/dsp demo/render_demo.cpp
 //       Source/dsp/DeFeedbackEngine.cpp -o demo_render
 //   ./demo_render
 //
@@ -283,6 +283,8 @@ int main()
     params.q             = 16.0f;
     params.attackMs      = 250.0f;
     params.musicGuard    = true;
+    params.autoQ         = true;  // width from the 4096 pt confirmation FFT
+    params.aiAssist      = false; // offline render: no AI worker attached
 
     engine.setParameters (params);
     engine.prepare (kSampleRate, 512);
@@ -293,12 +295,13 @@ int main()
         engine.process (wetL.data() + offset, wetR.data() + offset, n);
     }
 
-    defb::NotchInfo info[16] {};
-    const int notchCount = engine.getNotchInfo (info, 16);
+    defb::NotchInfo info[defb::Engine::kMaxNotches] {};
+    const int notchCount = engine.getNotchInfo (info, defb::Engine::kMaxNotches);
 
     std::printf ("Rendered 8.0 s, detected notches: %d\n", notchCount);
     for (int i = 0; i < notchCount; ++i)
-        std::printf ("  notch %d: %8.2f Hz  target %.1f dB\n", i + 1, info[i].freq, info[i].gainDb);
+        std::printf ("  notch %d: %8.2f Hz  %.1f dB  Q %.1f\n",
+                     i + 1, info[i].freq, info[i].gainDb, info[i].q);
 
     // ---- assemble: dry, pause, wet ----
     std::vector<float> outL, outR;

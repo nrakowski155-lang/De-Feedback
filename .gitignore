@@ -3,3 +3,10 @@ cmake-build-*/
 *.o
 *.a
 .DS_Store
+
+# Python training pipeline
+__pycache__/
+*.pyc
+training/dataset/
+training/checkpoints/
+training/export/

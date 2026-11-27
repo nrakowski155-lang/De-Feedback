@@ -99,6 +99,10 @@ private:
     juce::TextButton modeButtons[3];
     juce::TextButton guardButton { "MUSIC GUARD" };
     std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> guardAttachment;
+    juce::TextButton aiButton { "AI" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> aiAttachment;
+    juce::TextButton autoQButton { "AUTO Q" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> autoQAttachment;
     juce::TextButton clearButton { "CLEAR" };
     juce::Label statusLabel;
 

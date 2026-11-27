@@ -320,6 +320,16 @@ DeFeedbackAudioProcessorEditor::DeFeedbackAudioProcessorEditor (DeFeedbackAudioP
     guardAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
         processor.getApvts(), "musicGuard", guardButton);
 
+    aiButton.setClickingTogglesState (true);
+    addAndMakeVisible (aiButton);
+    aiAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        processor.getApvts(), "aiAssist", aiButton);
+
+    autoQButton.setClickingTogglesState (true);
+    addAndMakeVisible (autoQButton);
+    autoQAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        processor.getApvts(), "autoQ", autoQButton);
+
     clearButton.onClick = [this] { processor.clearNotches(); spectrum.repaint(); };
     addAndMakeVisible (clearButton);
 
@@ -391,8 +401,8 @@ void DeFeedbackAudioProcessorEditor::paint (juce::Graphics& g)
 
     g.setFont (font (8.5f * u, true));
     g.setColour (muted);
-    g.drawText ("ADAPTIVE FEEDBACK SUPPRESSOR",
-                juce::Rectangle<float> (24.0f * u, 46.0f * u, 300.0f * u, 14.0f * u),
+    g.drawText ("ADAPTIVE FEEDBACK SUPPRESSOR  ·  RESONANCE AI",
+                juce::Rectangle<float> (24.0f * u, 46.0f * u, 380.0f * u, 14.0f * u),
                 juce::Justification::centredLeft, false);
 
     g.setColour (accent.withAlpha (0.85f));
@@ -443,14 +453,20 @@ void DeFeedbackAudioProcessorEditor::resized()
     }
 
     guardButton.setBounds (juce::Rectangle<float> (168.0f * u, bottomTop + 12.0f * u,
-                                                   132.0f * u, 26.0f * u).toNearestInt());
+                                                   120.0f * u, 26.0f * u).toNearestInt());
+
+    aiButton.setBounds (juce::Rectangle<float> (296.0f * u, bottomTop + 12.0f * u,
+                                                 44.0f * u, 26.0f * u).toNearestInt());
+
+    autoQButton.setBounds (juce::Rectangle<float> (348.0f * u, bottomTop + 12.0f * u,
+                                                    72.0f * u, 26.0f * u).toNearestInt());
 
     const float clearW = 64.0f * u;
     clearButton.setBounds (juce::Rectangle<float> (w - 24.0f * u - clearW, bottomTop + 12.0f * u,
                                                    clearW, 26.0f * u).toNearestInt());
 
-    statusLabel.setBounds (juce::Rectangle<float> (318.0f * u, bottomTop + 12.0f * u,
-                                                   w - 318.0f * u - 24.0f * u - clearW - 12.0f * u,
+    statusLabel.setBounds (juce::Rectangle<float> (432.0f * u, bottomTop + 12.0f * u,
+                                                   w - 432.0f * u - 24.0f * u - clearW - 12.0f * u,
                                                    26.0f * u).toNearestInt());
 
     // mode buttons (header, right)
@@ -483,34 +499,53 @@ void DeFeedbackAudioProcessorEditor::updateStatus()
 {
     const int mode = (int) std::lround (processor.getApvts().getRawParameterValue ("mode")->load());
 
+    juce::String text;
+
     if (mode == 0)
     {
-        statusLabel.setText ("BYPASSED  ·  NO PROCESSING", juce::dontSendNotification);
-        return;
+        text = "BYPASSED  ·  NO PROCESSING";
     }
-
-    defb::NotchInfo info[defb::Engine::kMaxNotches] {};
-    const int count = processor.getEngine().getNotchInfo (info, defb::Engine::kMaxNotches);
-
-    if (count == 0)
+    else
     {
-        statusLabel.setText (mode == 2 ? "LISTENING  ·  DYNAMIC" : "LISTENING  ·  NO FEEDBACK",
-                             juce::dontSendNotification);
-        return;
+        defb::NotchInfo info[defb::Engine::kMaxNotches] {};
+        const int count = processor.getEngine().getNotchInfo (info, defb::Engine::kMaxNotches);
+
+        if (count == 0)
+        {
+            text = mode == 2 ? "LISTENING  ·  DYNAMIC" : "LISTENING  ·  NO FEEDBACK";
+        }
+        else
+        {
+            text << count << (count == 1 ? " NOTCH  ·  " : " NOTCHES  ·  ");
+
+            for (int i = 0; i < count && i < 5; ++i)
+            {
+                if (i > 0)
+                    text << "  ";
+
+                text << (info[i].freq >= 1000.0 ? juce::String (info[i].freq / 1000.0f, 2) + "k"
+                                                : juce::String ((int) std::lround (info[i].freq)));
+            }
+
+            text << " Hz";
+        }
     }
 
-    juce::String text;
-    text << count << (count == 1 ? " NOTCH  ·  " : " NOTCHES  ·  ");
+    const bool aiEnabled = processor.getApvts().getRawParameterValue ("aiAssist")->load() > 0.5f;
 
-    for (int i = 0; i < count && i < 5; ++i)
+    if (aiEnabled)
     {
-        if (i > 0)
-            text << "  ";
+        const auto ai = processor.getAiRuntimeInfo();
 
-        text << (info[i].freq >= 1000.0 ? juce::String (info[i].freq / 1000.0f, 2) + "k"
-                                        : juce::String ((int) std::lround (info[i].freq)));
+        text << "  ·  " << (ai.modelKind == defb::ai::kModelCoreMl ? "CORE ML" : "BUILTIN");
+
+        if (ai.maskFresh)
+            text << " " << (int) std::lround (ai.confidence * 100.0f) << "%";
+    }
+    else
+    {
+        text << "  ·  AI OFF";
     }
 
-    text << " Hz";
     statusLabel.setText (text, juce::dontSendNotification);
 }

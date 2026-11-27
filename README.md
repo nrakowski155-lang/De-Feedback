@@ -9,8 +9,15 @@ Vorbild ist der Arbeitsablauf von *Waves Feedback Hunter* bzw. *De-Feedback*:
 live einschleifen, Monitoranlage ausklingeln lassen, Notches setzen, fertig.
 
 Die Oberfläche zeigt das Live-Spektrum, markiert jede gesetzte Frequenz mit
-Frequenzlabel und bietet sechs Regler plus Frequenzbereich, Music-Guard-Schalter
-und einen CLEAR-Button.
+Frequenzlabel und bietet sechs Regler plus Frequenzbereich, Music-Guard-,
+AI- und AUTO-Q-Schalter sowie einen CLEAR-Button.
+
+Die zweite Ausbaustufe heißt **ResonanceAI**: ein kleines CNN+GRU-Modell
+(ca. 1,21 Mio. Parameter, FP16, Core ML) liefert eine Bandmaske, die der
+DSP-Engine als zusätzliche Evidenz dient. Ohne installiertes Modell läuft ein
+konservativer Built-in-Scorer; ohne frische Maske fällt die Engine automatisch
+auf den reinen DSP-Pfad zurück. Details in [training/README.md](training/README.md)
+und [docs/resonance-ai.md](docs/resonance-ai.md).
 
 ---
 
@@ -18,10 +25,13 @@ und einen CLEAR-Button.
 
 **Analyse**
 
-* 2048-Punkt-FFT, 75 % Überlappung (~21 ms Auflösung, 23 Hz Bin-Breite bei 48 kHz)
+* 2048-Punkt-FFT mit 256-Sample-Hop (5,33 ms Analyseintervall, 23 Hz
+  Bin-Breite bei 48 kHz)
+* 4096-Punkt-Bestätigungs-FFT alle 16 Hops (~85 ms): verfeinert die Frequenz
+  (im Test 0,3 Hz Fehler bei 1237,4 Hz) und misst die Peak-Breite
 * lokaler Spektralboden als 1/3-Oktav-Mittelwert, damit auch im vollen Mix ein
   schmaler Peak auffällt
-* Peak-Picking mit parabolischer Interpolation (Frequenzgenauigkeit ~1–2 Hz)
+* Peak-Picking mit parabolischer Interpolation
 * Prüfung auf **Schmalbandigkeit** (ein Howl ist wenige Hz breit)
 * **Harmonischen-Test**: hat der Peak Oberton-Verwandte (f/2, f/3, 2f, 3f), ist
   es mit hoher Wahrscheinlichkeit ein Instrument und kein Feedback
@@ -29,11 +39,18 @@ und einen CLEAR-Button.
   nicht; gemessen über die halbe Attack-Zeit
 * **Pegel-Gate** gegen Rauschen und **Music Guard** (Dominiert der Peak das
   Programm? Liegt er über dem Programm-RMS?)
+* **ResonanceAI-Bandmaske** (optional): 64 Bänder × 256 Frames, asynchron im
+  Worker-Thread berechnet, kann die Evidenz um bis zu +8 dB verstärken und bei
+  ≥ 70 % Konfidenz den Music Guard überstimmen – aber nie eine Erkennung
+  verhindern
 
 **Unterdrückung**
 
-* bis zu 16 Kerbfilter, gekoppelt stereo (links = rechts)
-* RBJ-Peaking-Biquads, Q einstellbar (schmal bis breit)
+* bis zu **12** dynamische Kerbfilter, gekoppelt stereo (links = rechts)
+* RBJ-Peaking-Biquads; **automatischer Q** aus der gemessenen Peak-Breite
+  (6–32, der WIDTH-Regler ist dann die Obergrenze) oder fester Q
+* **adaptive Tiefe**: 80–100 % der eingestellten Tiefe, je nachdem wie weit der
+  Peak über der Schwelle liegt
 * Tiefe bis −36 dB, Ein-/Ausblenden mit 30/80 ms (kein Klicken)
 * Frequenzgrenzen (Low/High) gegen Bass und Hiss
 * Notches werden bei Bedarf nachgeführt (langsame Retune) und bei vollem
@@ -161,15 +178,15 @@ cmake --build build -j 8
 | 0:08.6–0:10.1 | Pause |
 | 0:10.1–0:18.1 | **nachher**: identisches Material durch die Engine (HUNT, 18 dB Tiefe, Q 16) |
 
-Im letzten Abschnitt gemessen: **17,9 dB** bei 640 Hz, **18,3 dB** bei 1180 Hz,
-**18,2 dB** bei 1730 Hz. Das Musikbett bleibt erhalten (Peak trocken 0,762,
-nass 0,604). Die ersten Sekunden des nassen Teils zeigen bewusst den Hunt-Vorgang,
-bis die Notches greifen.
+Im letzten Abschnitt gemessen: **15,5 dB** bei 640 Hz, **16,8 dB** bei 1180 Hz,
+**16,3 dB** bei 1730 Hz. Die Engine setzt die Notches auf 639,5 / 1179,3 /
+1730,5 Hz (Auto-Q ≈ 32). Die ersten Sekunden des nassen Teils zeigen bewusst
+den Hunt-Vorgang, bis die Notches greifen.
 
 Neu rendern:
 
 ```bash
-g++ -O2 -std=c++17 -I Source/dsp demo/render_demo.cpp \
+g++ -O2 -std=c++20 -I Source/dsp demo/render_demo.cpp \
     Source/dsp/DeFeedbackEngine.cpp -o demo_render
 ./demo_render
 ```
@@ -196,16 +213,59 @@ einsetzbar.
 |---|---|---|---|
 | Mode | Off / Hunt / Dynamic | Hunt | Betriebsart |
 | Sensitivity | 3–24 dB | 9 dB | Wie weit muss ein Peak über dem lokalen Spektralboden liegen? |
-| Notches | 1–16 | 8 | Maximale Anzahl Kerbfilter |
-| Depth | 3–36 dB | 18 dB | Absenkung pro Notch |
-| Width (Q) | 2–48 | 16 | Höher = schmaler |
+| Notches | 1–12 | 8 | Maximale Anzahl Kerbfilter |
+| Depth | 3–36 dB | 18 dB | Maximale Absenkung pro Notch (adaptiv 80–100 %) |
+| Width (Q) | 2–48 | 16 | Höher = schmaler; bei Auto Q die Obergrenze |
 | Attack | 10–2000 ms | 250 ms | Wie lange muss ein Peak bestehen? |
 | Release | 0,1–20 s | 2,5 s | Nur im Dynamic-Modus |
 | Low / High | 30–800 Hz / 2–20 kHz | 40 Hz / 16 kHz | Analyse- und Filterbereich |
 | Music Guard | an/aus | an | Harmonischen-/Wachstums-/Pegelprüfung |
+| AI Assist | an/aus | an | ResonanceAI-Bandmaske als zusätzliche Evidenz |
+| Auto Q | an/aus | an | Q aus der gemessenen Peak-Breite (4096-FFT) |
 
 Bei Rückkopplung im Bass (z. B. Kontrabass, Bass-Amp) ggf. Low auf 60–80 Hz
 setzen, damit musikalische Grundtöne nicht als Feedback gelten.
+
+---
+
+## ResonanceAI (KI-Stufe)
+
+**Architektur**
+
+* Der DSP erzeugt alle 256 Samples ein 64-Band-Spektrumpatch (256 Frames,
+  band-major, letzter Frame = aktuell) und veröffentlicht es über einen Seqlock.
+* Ein Worker-Thread (`juce::Thread`) kopiert den Patch, führt das Modell aus und
+  postet eine Bandmaske (0…1) über eine lock-free SPSC-Queue zurück.
+* Die Engine liest die Maske im Analyseframe. Nur wenn sie jünger als 500 ms ist,
+  erhöht sie die Prominenz um bis zu +8 dB; ab 70 % Konfidenz darf sie den
+  Music Guard überstimmen. Ein Veto („Maske sagt kein Feedback“) gibt es bewusst
+  nicht – ein unvalidiertes Modell darf keinen echten Howl unterdrücken.
+* Modell-Laden und Warm-up passieren beim Plugin-Start, nie im Audio-Callback.
+
+**Modell-Vertrag**
+
+| | |
+|---|---|
+| Eingang | `spectrogram` float32 [1, 1, 64, 256], normalisierte dB (0…1) |
+| Ausgänge | `mask` [1, 64], `clip` [1, 1] |
+| Modell | CNN + GRU, ca. 1,21 Mio. Parameter, FP16, < 10 MB |
+| Laufzeit | Core ML, CPU + Neural Engine (umschaltbar), Fallback Built-in |
+
+**Modell installieren**
+
+```bash
+mkdir -p ~/Library/Application\ Support/ResonanceAI
+cp -R ResonanceFeedback.mlmodelc ~/Library/Application\ Support/ResonanceAI/
+```
+
+Alternativ `RESONANCE_AI_MODEL=/pfad/ResonanceFeedback.mlmodelc` setzen. Die
+Statuszeile zeigt `CORE ML` bzw. `BUILTIN`; `RESONANCE_AI_COMPUTE_UNITS=1|2|3`
+wählt CPU / CPU+NE / alle Einheiten für den Benchmark.
+
+**Training** (PyTorch → Core ML) ist in [training/README.md](training/README.md)
+beschrieben. **Es ist noch kein trainiertes Modell im Repository** – Pipeline,
+Vertrag und Fallback sind fertig; das Training braucht echte Raum- und
+Mikrofonaufnahmen und läuft auf dem Mac.
 
 ---
 
@@ -214,8 +274,9 @@ setzen, damit musikalische Grundtöne nicht als Feedback gelten.
 Der DSP-Kern ist framework-frei und lässt sich überall bauen:
 
 ```bash
-g++ -O2 -std=c++17 -I Source/dsp \
-    tests/dsp_test.cpp Source/dsp/DeFeedbackEngine.cpp -o defb_tests
+g++ -O2 -std=c++20 -I Source/dsp -I Source/ai \
+    tests/dsp_test.cpp Source/dsp/DeFeedbackEngine.cpp Source/ai/MaskModel.cpp \
+    -o defb_tests
 ./defb_tests
 ```
 
@@ -224,30 +285,44 @@ Geprüft werden unter anderem:
 * FFT-Amplitude und Fenster-Normierung
 * bit-exakter Bypass
 * eine Koppelfrequenz bei 1 kHz, die exponentiell aufbaut → Notch sitzt auf
-  ±25 Hz, der Ton wird um **17,9 dB** abgesenkt, das Programm bleibt erhalten
+  ±25 Hz, der Ton wird um **17,0 dB** abgesenkt, das Programm bleibt erhalten
 * drei gleichzeitige Howls (350 / 1450 / 3200 Hz) → drei Notches
 * 12 s realistisches Programmmaterial (Oberton-Instrumente, Akkordwechsel,
   Drums) → **keine** Fehlauslösung
 * Dynamic-Modus gibt den Notch frei, wenn die Kopplung weg ist
-* Extremwerte (16 Notches, −36 dB, Q 48, 96 kHz) bleiben stabil und endlich
+* 4096er-Bestätigung: 1237,4 Hz auf **0,3 Hz** genau, Auto-Q im Bereich 6–32
+* Extremwerte (12 Notches, −36 dB, Q 48, 96 kHz) bleiben stabil und endlich
+* 64 × 256-Patch: Revision, Wertebereich 0…1, Signalanteil
+* Masken-Vertrag: frische Maske wird übernommen, Modell und Konfidenz gemeldet
+* Built-in-Modell: Stille → niedrige, schmaler Peak → hohe Konfidenz
+* KI-Maske setzt eine gehaltene Resonanz, die der DSP allein verwirft
+* Built-in-Maske über den Worker-Pfad auf 12 s Musik → **keine** Fehlauslösung
 * Reset entfernt alle Notches
 
-Aktueller Stand: 15 Checks, 0 Fehler.
+Aktueller Stand: **37 Checks, 0 Fehler**.
 
 ---
 
 ## Wie es intern funktioniert
 
-`Source/dsp/DeFeedbackEngine.*` ist der komplette Algorithmus, ohne JUCE.
-`Source/PluginProcessor.*` ist nur die Host-Anbindung (Parameter, Busse, State),
-`Source/PluginEditor.*` die Oberfläche.
+`Source/dsp/DeFeedbackEngine.*` ist der komplette DSP-Algorithmus, ohne JUCE.
+`Source/ai/*` enthält den Modell-Vertrag, die Built-in-Maske, die Lock-free-Queue
+und die Core-ML-Bridge. `Source/PluginProcessor.*` ist die Host-Anbindung
+(Parameter, Busse, State, AI-Worker), `Source/PluginEditor.*` die Oberfläche.
 
 Signalfluss pro Block:
 
 ```
-Eingang ──┬─► FFT-Analyse (nur lesen) ─► Kandidaten ─► Tracker ─► Notch-Ziele
-          └─► Kerbfilter (max. 16) ─► Ausgang
+Eingang ──┬─► 2048-FFT (nur lesen) ─► Kandidaten ─► Tracker ─► Notch-Ziele
+          │        │                                     ▲
+          │        └─► 64×256-Patch (seqlock) ─► AI-Worker ─► Bandmaske (SPSC)
+          └─► Kerbfilter (max. 12) ─► Ausgang
 ```
+
+Der Audio-Thread alloziert nicht, wartet nie auf die KI und nimmt keine Locks:
+Der Patch wird über einen Seqlock veröffentlicht, die Maske kommt über eine
+lock-free Single-Producer/Single-Consumer-Queue zurück. Ist die Maske älter als
+500 ms, arbeitet die Engine unverändert rein DSP-basiert.
 
 Die Analyse läuft bewusst **vor** den Filtern auf dem echten Eingangssignal:
 Das Plugin „hört" die Kopplung also weiter, auch wenn der Notch sie schon
@@ -267,9 +342,14 @@ endlos auf- und zuzumachen.
   Monitor-EQ und Gain-Struktur bleiben die eigentliche Lösung.
 * Audio Units lassen sich nur auf macOS bauen. In der Entwicklungsumgebung dieses
   Projekts (Linux-Container) wurde der DSP-Kern vollständig kompiliert und
-  getestet und die JUCE-Plugin-Quellen gegen JUCE 8.0.9 übersetzt
-  (Syntax-/Semantikprüfung); ein AU-Bundle wurde dort nicht gelinkt, dafür ist
-  Xcode nötig.
+  getestet; ein AU-Bundle wurde dort nicht gelinkt, dafür ist Xcode nötig. Die
+  Core-ML-Bridge ist macOS-only und wurde hier nur reviewt, nicht kompiliert.
+* Ohne installiertes, trainiertes Modell arbeitet die KI-Stufe mit dem
+  Built-in-Scorer (Schmalbandigkeit + Wachstum). Der eigentliche Gewinn
+  (Gesang vs. Feedback) entsteht erst mit dem trainierten Modell.
+* Die Performance-Ziele (Inferenz p95 < 10 ms, < 150 MB, < 10 % eines Kerns,
+  keine Dropouts, Latenz in Logic) sind **nicht gemessen**. Die GUI wurde nie
+  gerendert, weil in dieser Umgebung kein macOS-Display verfügbar ist.
 
 ## Lizenz
 

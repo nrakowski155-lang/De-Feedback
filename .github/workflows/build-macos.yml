@@ -29,6 +29,11 @@ jobs:
           cmake --version
           uname -m
 
+      - name: Check training pipeline (syntax)
+        run: |
+          python3 -m py_compile training/*.py
+          echo "training scripts parse"
+
       - name: Configure
         run: |
           cmake -B build \

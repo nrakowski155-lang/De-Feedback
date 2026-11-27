@@ -1,5 +1,6 @@
-// Offline verification of the De-Feedback engine.
-// Build:  g++ -O2 -std=c++17 -I Source/dsp tests/dsp_test.cpp Source/dsp/DeFeedbackEngine.cpp -o /tmp/defb_tests
+// Offline verification of the De-Feedback / ResonanceAI DSP core.
+// Build:  see CMake target defb_dsp_tests, or compile tests/dsp_test.cpp together
+//         with Source/dsp/DeFeedbackEngine.cpp and Source/ai/MaskModel.cpp (C++20).
 // Run:    /tmp/defb_tests
 
 #include <algorithm>
@@ -8,9 +9,11 @@
 #include <functional>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "DeFeedbackEngine.h"
+#include "MaskModel.h"
 
 using namespace defb;
 
@@ -355,7 +358,7 @@ static void testDynamicRelease()
 
 static void testExtremeSettingsStayStable()
 {
-    std::printf ("\nExtremeinstellungen bleiben stabil\n");
+    std::printf ("\nExtremeinstellungen bleiben stabil (12 Notches)\n");
 
     const double sr = 96000.0;
     const int n = (int) (sr * 4.0);
@@ -373,7 +376,7 @@ static void testExtremeSettingsStayStable()
     Parameters p;
     p.mode         = Mode::Hunt;
     p.sensitivityDb = 3.0f;
-    p.maxNotches   = 16;
+    p.maxNotches   = 12;
     p.depthDb      = 36.0f;
     p.q            = 48.0f;
     p.attackMs     = 10.0f;
@@ -407,6 +410,307 @@ static void testExtremeSettingsStayStable()
     check (engine.getNumNotches() == 0, "Reset entfernt alle Notches", buf);
 }
 
+static void testFineConfirmation()
+{
+    std::printf ("\n4096-Punkt-Bestaetigung: exakte Frequenz und Auto-Q\n");
+
+    const double sr = 48000.0;
+    const int n = (int) (sr * 5.0);
+    const double howlFreq = 1237.4; // deliberately off the 2048 bin grid
+
+    std::mt19937 rng (53);
+    auto bed = musicBed (n, sr, rng, false);
+    auto howl = addHowls (n, sr, { { howlFreq, 0.4, 2.4, 0.0008, 0.28 } });
+    mixInto (bed, howl);
+
+    auto l = bed, r = bed;
+
+    Engine engine;
+    Parameters p;
+    p.mode          = Mode::Hunt;
+    p.sensitivityDb = 9.0f;
+    p.autoQ         = true;
+    p.attackMs      = 250.0f;
+    p.musicGuard    = true;
+    engine.setParameters (p);
+    engine.prepare (sr, 128);
+
+    processStereo (engine, l, r);
+
+    NotchInfo info[Engine::kMaxNotches] {};
+    const int count = engine.getNotchInfo (info, Engine::kMaxNotches);
+
+    float bestError = 1.0e9f;
+    float bestQ = 0.0f;
+
+    for (int i = 0; i < count; ++i)
+    {
+        const float error = std::abs (info[i].freq - (float) howlFreq);
+        if (error < bestError) { bestError = error; bestQ = info[i].q; }
+    }
+
+    char buf[128];
+    std::snprintf (buf, sizeof buf, "count=%d, error=%.2f Hz, Q=%.1f", count, (double) bestError, (double) bestQ);
+    check (count >= 1, "Notch fuer die bestaetigte Frequenz", buf);
+    check (bestError < 4.0f, "Frequenz auf < 4 Hz genau", buf);
+    check (bestQ >= 6.0f && bestQ <= 32.0f, "automatischer Q im gueltigen Bereich", buf);
+}
+
+static void testAiMaskAssist()
+{
+    std::printf ("\nResonanceAI-Maske: zusaetzliche Evidenz, kein Veto\n");
+
+    const double sr = 48000.0;
+    const int n = (int) (sr * 6.0);
+    const double toneFreq = 1500.0;
+
+    // steady, quiet resonance inside a loud noise floor: no growth, not
+    // dominant. With sensitivity 20 dB the DSP alone has no candidate at all.
+    std::mt19937 rng (71);
+    std::normal_distribution<float> dist (0.0f, 1.0f);
+    std::vector<float> bed ((size_t) n);
+
+    for (int i = 0; i < n; ++i)
+        bed[(size_t) i] = 0.10f * dist (rng)
+                        + (float) (0.02 * std::sin (2.0 * kPi * toneFreq * (double) i / sr));
+
+    Parameters p;
+    p.mode          = Mode::Hunt;
+    // deliberately above the tone's own prominence: without the mask there is
+    // no candidate at all, with the mask the model lifts it over the threshold
+    p.sensitivityDb = 20.0f;
+    p.attackMs      = 250.0f;
+    p.musicGuard    = true;
+
+    auto run = [&] (bool withAi)
+    {
+        auto l = bed, r = bed;
+
+        Engine engine;
+        p.aiAssist = withAi;
+        engine.setParameters (p);
+        engine.prepare (sr, 128);
+
+        const int band = engine.getBandForFrequency ((float) toneFreq);
+
+        for (size_t offset = 0; offset < l.size(); offset += 512)
+        {
+            if (withAi)
+            {
+                ai::Mask mask {};
+                mask.model = ai::kModelBuiltin;
+                mask.timestampMs = ai::nowMs();
+                mask.confidence[band] = 1.0f;
+                engine.postAiMask (mask);
+            }
+
+            const int block = (int) std::min<size_t> (512, l.size() - offset);
+            engine.process (l.data() + offset, r.data() + offset, block);
+        }
+
+        NotchInfo info[Engine::kMaxNotches] {};
+        const int count = engine.getNotchInfo (info, Engine::kMaxNotches);
+        bool found = false;
+
+        for (int i = 0; i < count; ++i)
+            if (std::abs (info[i].freq - (float) toneFreq) < 30.0f)
+                found = true;
+
+        return std::make_pair (count, found);
+    };
+
+    const auto dspOnly = run (false);
+    const auto withAi  = run (true);
+
+    char buf[128];
+    std::snprintf (buf, sizeof buf, "DSP=%d AI=%d", dspOnly.first, withAi.first);
+    check (dspOnly.first == 0, "ohne Maske bleibt der gehaltene Ton unangetastet", buf);
+    check (withAi.second, "mit KI-Maske wird dieselbe Frequenz gesetzt", buf);
+}
+
+static void testAiMaskContract()
+{
+    std::printf ("\nAI-Patch- und Masken-Vertrag\n");
+
+    const double sr = 48000.0;
+    const int n = (int) (sr * 2.0);
+
+    std::mt19937 rng (61);
+    auto bed = musicBed (n, sr, rng, false);
+
+    auto l = bed, r = bed;
+
+    Engine engine;
+    Parameters p;
+    p.mode = Mode::Hunt;
+    engine.setParameters (p);
+    engine.prepare (sr, 256);
+
+    const uint32_t before = engine.getAiPatchRevision();
+    processStereo (engine, l, r, 256);
+    const uint32_t after = engine.getAiPatchRevision();
+
+    std::vector<float> patch ((size_t) Engine::kPatchSize, -1.0f);
+    const int copied = engine.copyAiPatch (patch.data(), (int) patch.size());
+
+    bool inRange = true;
+    float peak = 0.0f;
+
+    for (float v : patch)
+    {
+        inRange = inRange && v >= 0.0f && v <= 1.0f;
+        peak = std::max (peak, v);
+    }
+
+    char buf[128];
+    std::snprintf (buf, sizeof buf, "rev %u->%u, copied=%d, peak=%.2f",
+                   before, after, copied, (double) peak);
+    check (after > before, "Patch-Revision steigt bei Audio", buf);
+    check (copied == Engine::kPatchSize, "64 x 256 Patch wird geliefert", buf);
+    check (inRange, "Patch-Werte liegen in 0 .. 1", buf);
+    check (peak > 0.05f, "Patch enthaelt Signal", buf);
+
+    const auto state = engine.getAiState();
+    std::snprintf (buf, sizeof buf, "model=%d fresh=%d", state.model, state.maskFresh ? 1 : 0);
+    check (state.patchRevision == after, "Status meldet die aktuelle Revision", buf);
+
+    // a mask posted by the worker must become visible in the published state
+    ai::Mask mask {};
+    mask.model = ai::kModelBuiltin;
+    mask.timestampMs = ai::nowMs();
+    mask.confidence[10] = 0.9f;
+    engine.postAiMask (mask);
+
+    std::vector<float> tailL ((size_t) 2048, 0.0f), tailR ((size_t) 2048, 0.0f);
+    engine.process (tailL.data(), tailR.data(), 2048);
+
+    const auto live = engine.getAiState();
+    std::snprintf (buf, sizeof buf, "model=%d fresh=%d conf=%.2f",
+                   live.model, live.maskFresh ? 1 : 0, (double) live.confidence);
+    check (live.maskFresh, "frische Maske wird uebernommen", buf);
+    check (live.model == ai::kModelBuiltin, "Modell-Kennung wird gemeldet", buf);
+    check (live.confidence > 0.85f, "Masken-Konfidenz wird gemeldet", buf);
+}
+
+static void testBuiltinMaskModel()
+{
+    std::printf ("\nBuilt-in-Modell (Fallback ohne Core ML)\n");
+
+    auto model = ai::createBuiltinMaskModel();
+    check (model != nullptr && model->ready(), "Built-in-Modell ist verfuegbar");
+
+    if (model == nullptr)
+        return;
+
+    std::vector<float> patch ((size_t) Engine::kPatchSize, 0.0f);
+    std::vector<float> mask ((size_t) Engine::kNumBands, 0.0f);
+    float clip = 0.0f;
+
+    check (model->infer (patch.data(), mask.data(), clip), "Inferenz auf Stille");
+    check (clip < 0.2f, "Stille ergibt keine Feedback-Konfidenz");
+
+    const int band = 24;
+
+    for (int t = 0; t < Engine::kPatchFrames; ++t)
+    {
+        for (int b = 0; b < Engine::kNumBands; ++b)
+        {
+            const int distance = std::abs (b - band);
+            patch[(size_t) b * Engine::kPatchFrames + t] = distance == 0 ? 0.8f
+                                                         : distance <= 4 ? 0.40f : 0.30f;
+        }
+    }
+
+    check (model->infer (patch.data(), mask.data(), clip), "Inferenz auf schmalbandigem Peak");
+
+    char buf[96];
+    std::snprintf (buf, sizeof buf, "conf=%.2f", (double) mask[(size_t) band]);
+    check (mask[(size_t) band] > 0.55f, "schmaler Peak erhaelt hohe Konfidenz", buf);
+}
+
+static void testBuiltinModelOnMusic()
+{
+    std::printf ("\nBuilt-in-Maske im Musikbett (keine Fehlausloesung)\n");
+
+    const double sr = 48000.0;
+    const int n = (int) (sr * 12.0);
+
+    std::mt19937 rng (67);
+    auto bed = musicBed (n, sr, rng, true);
+
+    auto l = bed, r = bed;
+
+    Engine engine;
+    Parameters p;
+    p.mode          = Mode::Hunt;
+    p.sensitivityDb = 9.0f;
+    p.attackMs      = 300.0f;
+    p.musicGuard    = true;
+    p.aiAssist      = true;
+    engine.setParameters (p);
+    engine.prepare (sr, 128);
+
+    auto model = ai::createBuiltinMaskModel();
+
+    std::vector<float> patch ((size_t) Engine::kPatchSize, 0.0f);
+    std::vector<float> mask ((size_t) Engine::kNumBands, 0.0f);
+
+    uint32_t lastRevision = 0;
+    int inferences = 0;
+
+    // mimics the plugin's AI worker: read the patch, score it, post the mask
+    for (size_t offset = 0; offset < l.size(); offset += 128)
+    {
+        const int block = (int) std::min<size_t> (128, l.size() - offset);
+        engine.process (l.data() + offset, r.data() + offset, block);
+
+        const uint32_t revision = engine.getAiPatchRevision();
+
+        if (revision != lastRevision && model != nullptr
+            && engine.copyAiPatch (patch.data(), (int) patch.size()) == (int) patch.size())
+        {
+            lastRevision = revision;
+
+            float clip = 0.0f;
+            if (model->infer (patch.data(), mask.data(), clip))
+            {
+                ai::Mask message {};
+
+                for (int b = 0; b < Engine::kNumBands; ++b)
+                    message.confidence[b] = mask[(size_t) b];
+
+                message.clipProbability = clip;
+                message.model           = ai::kModelBuiltin;
+                message.timestampMs     = ai::nowMs();
+
+                engine.postAiMask (message);
+                ++inferences;
+            }
+        }
+    }
+
+    char buf[128];
+    std::snprintf (buf, sizeof buf, "inferences=%d, notches=%d", inferences, engine.getNumNotches());
+    check (inferences > 100, "Worker-Pfad wurde durchlaufen", buf);
+    check (engine.getNumNotches() == 0, "Built-in-Maske loest keine Notches auf Musik aus", buf);
+}
+
+static void testNotchBudget()
+{
+    std::printf ("\n12-Notch-Budget\n");
+
+    Engine engine;
+    Parameters p;
+    p.maxNotches = 99; // clamped
+    engine.setParameters (p);
+
+    char buf[96];
+    std::snprintf (buf, sizeof buf, "kMaxNotches=%d, param=%d",
+                   Engine::kMaxNotches, engine.getParameters().maxNotches);
+    check (Engine::kMaxNotches == 12, "Engine-Limit ist 12", buf);
+    check (engine.getParameters().maxNotches == 12, "Parameter wird auf 12 begrenzt", buf);
+}
+
 static void testFftRoundTrip()
 {
     std::printf ("\nAnalyse-Fenster / FFT-Grundfunktion\n");
@@ -437,6 +741,12 @@ int main()
     testMusicOnlyNoFalsePositives();
     testDynamicRelease();
     testExtremeSettingsStayStable();
+    testFineConfirmation();
+    testAiMaskContract();
+    testBuiltinMaskModel();
+    testAiMaskAssist();
+    testBuiltinModelOnMusic();
+    testNotchBudget();
 
     std::printf ("\n-----------------------------\n");
     std::printf ("%d Checks, %d Fehler\n", gChecks, gFailures);

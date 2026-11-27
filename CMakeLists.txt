@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(DeFeedback VERSION 1.0.0 LANGUAGES C CXX)
+project(DeFeedback VERSION 1.1.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if (APPLE)
+    enable_language(OBJCXX)
     set(DEFB_PLUGIN_FORMATS AU VST3 Standalone)
     if (NOT CMAKE_OSX_DEPLOYMENT_TARGET)
         set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
@@ -18,6 +19,7 @@ endif()
 
 option(DEFB_BUILD_TESTS "Build the offline DSP test program" ON)
 option(DEFB_COPY_PLUGIN_AFTER_BUILD "Copy the built plugins into the user's plugin folders" ON)
+option(DEFB_WITH_COREML "Compile the Core ML bridge on macOS" ON)
 
 # JUCE can either be fetched or taken from a local checkout:
 #   cmake -B build -DJUCE_PATH=/path/to/JUCE
@@ -45,14 +47,21 @@ juce_add_plugin(DeFeedback
     PLUGIN_CODE             Dfb1
     FORMATS                 ${DEFB_PLUGIN_FORMATS}
     PRODUCT_NAME            "De-Feedback"
-    DESCRIPTION             "Adaptive feedback suppressor"
+    DESCRIPTION             "Adaptive feedback suppressor with ResonanceAI"
     VST3_CATEGORIES         Fx
     AU_MAIN_TYPE            kAudioUnitType_Effect)
 
 target_sources(DeFeedback PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
-    Source/dsp/DeFeedbackEngine.cpp)
+    Source/dsp/DeFeedbackEngine.cpp
+    Source/ai/MaskModel.cpp)
+
+if (APPLE AND DEFB_WITH_COREML)
+    target_sources(DeFeedback PRIVATE Source/ai/CoreMlMaskModel.mm)
+    target_compile_definitions(DeFeedback PRIVATE DEFB_WITH_COREML=1)
+    target_link_libraries(DeFeedback PRIVATE "-framework CoreML")
+endif()
 
 target_include_directories(DeFeedback PRIVATE Source)
 
@@ -73,11 +82,12 @@ target_link_libraries(DeFeedback
         juce::juce_recommended_warning_flags)
 
 # ---------------------------------------------------------------------------
-# Framework-free DSP tests (run on any platform with a C++17 compiler)
+# Framework-free DSP / AI-contract tests (run on any platform with a C++20 compiler)
 if (DEFB_BUILD_TESTS)
     add_executable(defb_dsp_tests
         tests/dsp_test.cpp
-        Source/dsp/DeFeedbackEngine.cpp)
-    target_include_directories(defb_dsp_tests PRIVATE Source/dsp)
-    set_target_properties(defb_dsp_tests PROPERTIES CXX_STANDARD 17)
+        Source/dsp/DeFeedbackEngine.cpp
+        Source/ai/MaskModel.cpp)
+    target_include_directories(defb_dsp_tests PRIVATE Source/dsp Source/ai)
+    set_target_properties(defb_dsp_tests PROPERTIES CXX_STANDARD 20)
 endif()
