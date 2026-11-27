@@ -21,6 +21,54 @@ und [docs/resonance-ai.md](docs/resonance-ai.md).
 
 ---
 
+## Download & automatische Installation
+
+Das fertige macOS-Paket (AU + VST3) hängt an jedem GitHub-Release. Der
+Bootstrap-Installer holt das neueste Release, prüft die SHA-256-Summe und
+installiert systemweit:
+
+```bash
+curl -fsSL -o install-latest.sh \
+  https://raw.githubusercontent.com/nrakowski155-lang/De-Feedback/main/scripts/install-latest.sh
+bash install-latest.sh
+```
+
+Oder aus dem geklonten Repo:
+
+```bash
+./scripts/install-latest.sh                  # neuestes Release
+./scripts/install-latest.sh --tag v1.1.0     # bestimmtes Release
+./scripts/install-latest.sh --print-url      # nur die Download-URL
+```
+
+**Privates Repository:** Der Download braucht eine Anmeldung – auch für das
+Skript selbst. Am einfachsten das Repo klonen und lokal starten:
+
+```bash
+git clone https://github.com/nrakowski155-lang/De-Feedback.git
+cd De-Feedback
+./scripts/install-latest.sh
+```
+
+Das Skript nutzt die GitHub CLI automatisch, wenn du einmalig `gh auth login`
+ausgeführt hast; alternativ `GITHUB_TOKEN` mit Lesezugriff auf Releases setzen.
+Das Paket lässt sich auch direkt auf der
+[Releases-Seite](https://github.com/nrakowski155-lang/De-Feedback/releases)
+herunterladen.
+
+Ein Release wird automatisch gebaut, sobald ein Tag gepusht wird:
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+Der CI-Lauf hängt dann `De-Feedback.pkg` (stabiler Name, daher funktioniert
+`/releases/latest/download/…` dauerhaft), `De-Feedback-Uninstall.pkg`, beide
+Plugin-ZIPs und `SHA256SUMS` an das Release.
+
+---
+
 ## Was das Plugin macht
 
 **Analyse**

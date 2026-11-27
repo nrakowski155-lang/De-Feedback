@@ -3,11 +3,12 @@ name: Build macOS (AU + VST3)
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: macos-build-${{ github.ref }}
@@ -121,6 +122,35 @@ jobs:
           fi
           ls -lh artifacts
 
+      - name: Prepare release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          installer="$(ls artifacts/De-Feedback-*.pkg | grep -v 'Uninstall' | head -n 1)"
+          uninstaller="$(ls artifacts/De-Feedback-Uninstall-*.pkg | head -n 1)"
+          test -n "$installer"
+          test -n "$uninstaller"
+          cp "$installer" artifacts/De-Feedback.pkg
+          cp "$uninstaller" artifacts/De-Feedback-Uninstall.pkg
+          (cd artifacts && shasum -a 256 De-Feedback.pkg De-Feedback-Uninstall.pkg > SHA256SUMS)
+          cat artifacts/SHA256SUMS
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "De-Feedback $GITHUB_REF_NAME" \
+            --notes "macOS Universal-Build (AU + VST3), ad-hoc signiert und nicht notarisiert. Installer: De-Feedback.pkg, Deinstaller: De-Feedback-Uninstall.pkg." \
+            --verify-tag || true
+          gh release upload "$GITHUB_REF_NAME" \
+            artifacts/De-Feedback.pkg \
+            artifacts/De-Feedback-Uninstall.pkg \
+            artifacts/De-Feedback-AU-macOS-universal.zip \
+            artifacts/De-Feedback-VST3-macOS-universal.zip \
+            artifacts/SHA256SUMS \
+            --clobber
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -129,5 +159,6 @@ jobs:
           path: |
             artifacts/*.zip
             artifacts/*.pkg
+            artifacts/SHA256SUMS
           if-no-files-found: warn
           retention-days: 30
