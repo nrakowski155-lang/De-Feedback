@@ -76,7 +76,19 @@ jobs:
         run: cmake --build build -j 4
 
       - name: Run DSP tests
-        run: ./build/defb_dsp_tests
+        run: |
+          set +e
+          ./build/defb_dsp_tests > /tmp/dsp-tests.log 2>&1
+          status=$?
+          cat /tmp/dsp-tests.log
+          # the job log needs admin rights, the run summary is readable by anyone
+          {
+            echo "## DSP tests (exit ${status})"
+            echo '```'
+            tail -n 120 /tmp/dsp-tests.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit ${status}
 
       - name: Check binary architectures
         run: |
