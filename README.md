@@ -23,9 +23,26 @@ und [docs/resonance-ai.md](docs/resonance-ai.md).
 
 ## Download & automatische Installation
 
-Das fertige macOS-Paket (AU + VST3) hängt an jedem GitHub-Release. Der
-Bootstrap-Installer holt das neueste Release, prüft die SHA-256-Summe und
-installiert systemweit:
+**Ein Paket, alles automatisch:** [De-Feedback-Installer.pkg](https://github.com/nrakowski155-lang/De-Feedback/releases/latest/download/De-Feedback-Installer.pkg)
+herunterladen und öffnen. Das kleine Bootstrap-Paket holt sich **während der
+Installation** die aktuellen AU-/VST3-Bundles aus dem neuesten GitHub-Release,
+prüft die SHA-256-Summen und installiert beide unter
+`/Library/Audio/Plug-Ins/…`. Es enthält selbst keine Plug-ins und bleibt daher
+nur wenige Kilobyte groß.
+
+> **Voraussetzung:** Das Paket lädt anonym von GitHub – das funktioniert nur,
+> wenn das Repository öffentlich ist. Bei einem privaten Repository schlägt der
+> Download im Installer fehl (Log: `/var/log/defeedback-bootstrap.log`). Dann
+> entweder `./scripts/install-latest.sh` mit `gh auth login` verwenden oder das
+> vollständige `De-Feedback.pkg` aus dem Release laden, das beide Plug-ins
+> direkt enthält.
+
+Der Link zeigt auf das Rolling-Release `latest`, das bei jedem Push auf `main`
+aktualisiert wird. Ein Tag wie `v1.1.0` erzeugt zusätzlich ein versioniertes
+Release. Paket und Bundles sind ad-hoc signiert und nicht notarisiert – beim
+ersten Öffnen ggf. Rechtsklick → **Öffnen**.
+
+**Alternativ per Skript** (funktioniert auch mit privatem Repository):
 
 ```bash
 curl -fsSL -o install-latest.sh \
@@ -56,16 +73,18 @@ Das Paket lässt sich auch direkt auf der
 [Releases-Seite](https://github.com/nrakowski155-lang/De-Feedback/releases)
 herunterladen.
 
-Ein Release wird automatisch gebaut, sobald ein Tag gepusht wird:
+Das Rolling-Release `latest` wird bei jedem Push auf `main` aktualisiert; ein
+versioniertes Release entsteht bei einem Tag:
 
 ```bash
 git tag v1.1.0
 git push origin v1.1.0
 ```
 
-Der CI-Lauf hängt dann `De-Feedback.pkg` (stabiler Name, daher funktioniert
-`/releases/latest/download/…` dauerhaft), `De-Feedback-Uninstall.pkg`, beide
-Plugin-ZIPs und `SHA256SUMS` an das Release.
+Angehängt werden `De-Feedback-Installer.pkg` (Bootstrap), `De-Feedback.pkg`
+(vollständiger Installer), `De-Feedback-Uninstall.pkg`, beide Plugin-ZIPs und
+`SHA256SUMS`. Die stabilen Namen sorgen dafür, dass
+`/releases/latest/download/…` dauerhaft funktioniert.
 
 ---
 
@@ -189,6 +208,7 @@ lädt alles als Artifact hoch:
 * `De-Feedback-VST3-macOS-universal.zip`
 * `De-Feedback-<version>.pkg` (Installer, systemweit)
 * `De-Feedback-Uninstall-<version>.pkg` (Deinstaller)
+* `De-Feedback-Installer.pkg` (Bootstrap, lädt beim Installieren das Release)
 
 Zusätzlich prüft der Lauf die Skripte (`bash -n`) und führt einen Smoke-Test der
 Trainings-Pipeline aus: 12 synthetische Patches mit Shape-, Wertebereichs- und
